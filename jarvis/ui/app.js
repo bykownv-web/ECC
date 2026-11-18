@@ -54,9 +54,38 @@
   }
 
   // ---------- часы ----------
+  const startedAt = Date.now();
   function tickClock() {
     const d = new Date();
-    $('clock').textContent = d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+    $('clock').textContent = d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    $('date-label').textContent = d.toLocaleDateString('ru-RU', { weekday: 'short', day: '2-digit', month: 'long', year: 'numeric' }).toUpperCase();
+    const mins = Math.floor((Date.now() - startedAt) / 60000);
+    $('uptime-label').textContent = 'UPTIME ' + String(Math.floor(mins / 60)).padStart(2, '0') + ':' + String(mins % 60).padStart(2, '0');
+  }
+
+  function setBar(name, value) {
+    const bar = $('sys-' + name + '-bar');
+    const label = $('sys-' + name);
+    if (value === null || value === undefined) {
+      label.textContent = '—';
+      return;
+    }
+    bar.style.width = Math.max(0, Math.min(100, value)) + '%';
+    bar.classList.toggle('hot', value >= 85);
+    label.textContent = Math.round(value) + '%';
+  }
+
+  async function pollStats() {
+    if (api() && api().get_system_stats) {
+      try {
+        const st = await api().get_system_stats();
+        setBar('cpu', st.cpu);
+        setBar('ram', st.ram);
+        setBar('disk', st.disk);
+      } catch (e) {
+        /* телеметрия необязательна */
+      }
+    }
   }
   setInterval(tickClock, 1000);
   tickClock();
@@ -231,9 +260,9 @@
       const tr = el('tr', null, [
         el('td', null, [link, el('div', null, [el('span', { cls: 'law', text: p.law || '—' })]),
           el('div', { cls: 'small', text: p.method || '' })]),
-        el('td', null, [document.createTextNode(p.title || '—'),
+        el('td', null, [el('div', { cls: 'clamp', text: p.title || '—', title: p.title || '' }),
           el('div', { cls: 'small', text: (p.tags || []).join(', ') })]),
-        el('td', { text: p.customer || '—' }),
+        el('td', null, [el('div', { cls: 'clamp clamp-3', text: p.customer || '—', title: p.customer || '' })]),
         el('td', { cls: 'num', text: money(p.price) }),
         deadline,
       ]);
@@ -250,8 +279,11 @@
     const top = $('top-customers');
     top.textContent = '';
     (a ? a.top_customers : []).forEach((c) => {
-      top.appendChild(el('li', null, [document.createTextNode(c.customer + ' — '), el('span', { text: money(c.sum) }),
-        document.createTextNode(' (' + c.count + ')')]));
+      top.appendChild(el('li', { title: c.customer }, [
+        el('div', { cls: 'clamp clamp-2', text: c.customer }),
+        el('span', { text: money(c.sum) }),
+        document.createTextNode(' · закупок: ' + c.count),
+      ]));
     });
     const tags = $('by-tag');
     tags.textContent = '';
@@ -459,5 +491,7 @@
     applyState(st);
     addMessage('assistant', st.greeting);
     setMode('idle');
+    pollStats();
+    setInterval(pollStats, 3000);
   });
 })();

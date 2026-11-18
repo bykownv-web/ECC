@@ -118,6 +118,22 @@ class JarvisApi:
             "greeting": self._greeting(),
         }
 
+    def get_system_stats(self) -> dict[str, Any]:
+        """Телеметрия для панели ядра: загрузка процессора, памяти и диска в процентах."""
+        try:
+            import os
+
+            import psutil
+
+            drive = (os.environ.get("SystemDrive", "C:") + "\\") if os.name == "nt" else "/"
+            return {
+                "cpu": psutil.cpu_percent(interval=None),
+                "ram": psutil.virtual_memory().percent,
+                "disk": psutil.disk_usage(drive).percent,
+            }
+        except Exception:
+            return {"cpu": None, "ram": None, "disk": None}
+
     def _ai_label(self) -> str:
         provider = self._brain.provider()
         if provider == "ollama":
