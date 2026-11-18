@@ -6,21 +6,22 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <div class="hud-bg" aria-hidden="true"></div>
+  <div class="hud-bg" aria-hidden="true"><i class="hud-glow g1"></i><i class="hud-glow g2"></i></div>
   <header class="topbar">
     <div class="brand">
       <svg class="brand-mark" viewBox="0 0 40 40" aria-hidden="true">
-        <circle cx="20" cy="20" r="17" />
-        <circle cx="20" cy="20" r="11" class="dash" />
-        <polygon points="20,11 28,25 12,25" />
+        <circle cx="20" cy="20" r="18" class="bm-ring" />
+        <circle cx="20" cy="20" r="14" class="dash" />
+        <polygon points="20,10.5 28.2,15.25 28.2,24.75 20,29.5 11.8,24.75 11.8,15.25" class="bm-hex" />
+        <circle cx="20" cy="20" r="3.2" class="bm-core" />
       </svg>
       <div>
         <div class="brand-title">J.A.R.V.I.S.</div>
-        <div class="brand-sub">Personal assistant system · Mk VII</div>
+        <div class="brand-sub">Персональный ассистент · v7.0</div>
       </div>
     </div>
     <div class="ticker" aria-hidden="true">
-      <span class="ticker-dot"></span><span>SYS ONLINE</span>
+      <span class="ticker-dot"></span><span class="ticker-on">SYS ONLINE</span>
       <span class="sep">//</span><span id="date-label">—</span>
       <span class="sep sep-uptime">//</span><span id="uptime-label">UPTIME 00:00</span>
     </div>
@@ -39,31 +40,45 @@
           <defs>
             <radialGradient id="core-grad">
               <stop offset="0%" stop-color="#ffffff" />
-              <stop offset="35%" stop-color="var(--accent)" />
-              <stop offset="100%" stop-color="var(--accent)" stop-opacity="0" />
+              <stop offset="30%" stop-color="var(--c)" />
+              <stop offset="100%" stop-color="var(--c)" stop-opacity="0" />
             </radialGradient>
-            <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
-              <feGaussianBlur stdDeviation="3" result="b" />
-              <feMerge><feMergeNode in="b" /><feMergeNode in="SourceGraphic" /></feMerge>
-            </filter>
+            <radialGradient id="halo-grad">
+              <stop offset="55%" stop-color="var(--c)" stop-opacity="0" />
+              <stop offset="78%" stop-color="var(--c)" stop-opacity="0.16" />
+              <stop offset="100%" stop-color="var(--c)" stop-opacity="0" />
+            </radialGradient>
           </defs>
+          <circle cx="120" cy="120" r="118" class="halo" fill="url(#halo-grad)" />
           <g class="spin s-ticks"><circle cx="120" cy="120" r="114" class="ticks" /></g>
-          <g class="spin s-a"><circle cx="120" cy="120" r="102" class="arc-a" /></g>
-          <g class="spin s-b"><circle cx="120" cy="120" r="90" class="arc-b" /></g>
-          <g class="spin s-c"><circle cx="120" cy="120" r="78" class="arc-c" /></g>
-          <circle cx="120" cy="120" r="62" class="thin" />
-          <g class="spin s-coil"><circle cx="120" cy="120" r="50" class="coil" /></g>
-          <g class="spin s-tri" filter="url(#glow)"><polygon points="120,84 151,138 89,138" class="tri" /></g>
+          <circle cx="120" cy="120" r="107" class="thin" />
+          <g class="spin s-a">
+            <circle cx="120" cy="120" r="100" class="arc-a-glow" />
+            <circle cx="120" cy="120" r="100" class="arc-a" />
+          </g>
+          <g class="spin s-b"><circle cx="120" cy="120" r="91" class="arc-b" /></g>
+          <g class="spin s-c"><circle cx="120" cy="120" r="82" class="arc-c" /></g>
+          <g class="brackets">
+            <path d="M120 44 l-6 -6 h12 z" /><path d="M120 196 l-6 6 h12 z" />
+            <path d="M44 120 l-6 -6 v12 z" /><path d="M196 120 l6 -6 v12 z" />
+          </g>
+          <circle cx="120" cy="120" r="70" class="thin" />
+          <g class="spin s-coil"><circle cx="120" cy="120" r="57" class="coil" /></g>
+          <circle cx="120" cy="120" r="45" class="thin inner" />
+          <g class="spin s-tri">
+            <polygon points="120,86 149.4,103 149.4,137 120,154 90.6,137 90.6,103" class="tri" />
+            <polygon points="120,96 140.8,108 140.8,132 120,144 99.2,132 99.2,108" class="tri-in" />
+          </g>
           <circle cx="120" cy="120" r="30" class="core-glow" fill="url(#core-grad)" />
-          <circle cx="120" cy="120" r="12" class="core-dot" />
+          <circle cx="120" cy="120" r="11" class="core-dot" />
         </svg>
       </div>
       <div id="state-label" class="state-label">Ожидание</div>
       <div id="tool-label" class="tool-label"></div>
 
       <div class="core-buttons">
-        <button id="mic-btn" class="btn btn-primary" title="Сказать команду">🎙 Говорить</button>
-        <button id="stop-btn" class="btn" title="Прервать речь">⏹ Тише</button>
+        <button id="mic-btn" class="btn btn-primary" title="Сказать команду"><svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="5.5" y="1.5" width="5" height="8.5" rx="2.5" /><path d="M3 8a5 5 0 0 0 10 0M8 13v2" /></svg>Говорить</button>
+        <button id="stop-btn" class="btn" title="Прервать речь"><svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="3.5" y="3.5" width="9" height="9" /></svg>Тише</button>
       </div>
       <label class="switch">
         <input type="checkbox" id="wake-toggle">
@@ -71,6 +86,7 @@
       </label>
 
       <div class="telemetry">
+        <div class="tele-head" aria-hidden="true"><span>Телеметрия</span><span class="panel-code">SYS-02</span></div>
         <div class="tele-row"><span>CPU</span><div class="bar"><i id="sys-cpu-bar"></i></div><b id="sys-cpu">—</b></div>
         <div class="tele-row"><span>RAM</span><div class="bar"><i id="sys-ram-bar"></i></div><b id="sys-ram">—</b></div>
         <div class="tele-row"><span>DISK</span><div class="bar"><i id="sys-disk-bar"></i></div><b id="sys-disk">—</b></div>
@@ -91,6 +107,7 @@
 
       <!-- Диалог -->
       <div class="tab-body active" id="tab-chat">
+        <div class="chat-head" aria-hidden="true"><span class="ch-dot"></span><span>Канал связи</span><span class="ch-line"></span><span class="panel-code">LINK · SECURE</span></div>
         <div id="messages" class="messages" aria-live="polite"></div>
         <form id="chat-form" class="chat-form">
           <input id="chat-input" type="text" autocomplete="off" placeholder="Напишите команду или вопрос…">
@@ -173,6 +190,13 @@
 
       <!-- Заявка -->
       <div class="tab-body" id="tab-tender">
+        <ol class="tender-progress" aria-hidden="true">
+          <li class="tp tp-1"><b>01</b><span>Закупка</span></li>
+          <li class="tp tp-2"><b>02</b><span>Документы ТЗ</span></li>
+          <li class="tp tp-3"><b>03</b><span>Разбор</span></li>
+          <li class="tp tp-4"><b>04</b><span>Подбор</span></li>
+          <li class="tp tp-5"><b>05</b><span>Заявка</span></li>
+        </ol>
         <div class="tender-grid">
           <section class="tender-step" id="step-purchase">
             <header class="step-head"><span class="step-num">01</span><h2>Закупка</h2></header>
@@ -187,7 +211,7 @@
             <header class="step-head"><span class="step-num">02</span><h2>Документы ТЗ</h2></header>
             <div class="step-actions">
               <button class="btn btn-primary" id="tender-fetch" type="button">⇩ Скачать с ЕИС</button>
-              <button class="btn" id="tender-pick" type="button">📂 Выбрать файлы…</button>
+              <button class="btn" id="tender-pick" type="button">▣ Выбрать файлы…</button>
               <button class="btn btn-ghost" id="tender-clear" type="button">Очистить</button>
             </div>
             <ul id="tender-files" class="file-list"></ul>
