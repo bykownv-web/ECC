@@ -188,6 +188,8 @@
       only_active: $('only-active').checked,
       price_from: num('price-from'),
       price_to: num('price-to'),
+      strict: $('strict').checked,
+      minus_words: $('minus-words').value.split(/[,;\n]/).map((x) => x.trim()).filter(Boolean),
     };
   }
 
@@ -355,8 +357,10 @@
     posBody.textContent = '';
     $('tender-positions-table').style.display = a && a.positions && a.positions.length ? '' : 'none';
     if (a) {
-      [['Кратко', a.summary], ['Место поставки', a.delivery_place], ['Сроки поставки', a.delivery_terms],
-        ['Обеспечение заявки', a.bid_security], ['Обеспечение контракта', a.contract_security], ['Гарантия', a.warranty]]
+      [['Кратко', a.summary], ['Срок поставки', a.delivery_terms], ['Место поставки', a.delivery_place],
+        ['Монтаж и пусконаладка', a.installation], ['Оплата', a.payment_terms], ['Приёмка', a.acceptance_terms],
+        ['Срок контракта', a.contract_term], ['Штрафы и пени', a.penalties], ['Гарантия', a.warranty],
+        ['Обеспечение заявки', a.bid_security], ['Обеспечение контракта', a.contract_security]]
         .forEach(([k, v]) => facts.appendChild(kv(k, v)));
       [['Ограничения', a.restrictions], ['Требования к участнику', a.participant_requirements], ['Документы в заявке', a.documents_required]]
         .forEach(([title, items]) => {
@@ -393,6 +397,63 @@
       ]));
     });
 
+    const est = $('tender-estimate');
+    est.textContent = '';
+    const e = st && st.estimate;
+    const t = (st && st.totals) || {};
+    est.classList.toggle('empty-state', !e);
+    if (!e) {
+      est.textContent = 'Появится после разбора ТЗ.';
+    } else {
+      est.appendChild(el('div', { cls: 'facts an-facts' }, [
+        kv('НМЦК', money(p && p.price)),
+        kv('Оборудование', money(t.equipment_min) + ' – ' + money(t.equipment_max)),
+        kv('Монтаж', e.installation_required ? money(t.installation_min) + ' – ' + money(t.installation_max) : 'не требуется'),
+        kv('Себестоимость', money(t.cost_min) + ' – ' + money(t.cost_max)),
+        kv('Маржа', t.margin_min !== null && t.margin_min !== undefined
+          ? money(t.margin_min) + ' – ' + money(t.margin_max) + ' (' + t.margin_pct_min + '…' + t.margin_pct_max + '%)' : '—'),
+        kv('Рекомендация', e.recommendation || '—'),
+      ]));
+      if (e.equipment && e.equipment.length) {
+        const body = el('tbody');
+        e.equipment.forEach((it) => body.appendChild(el('tr', null, [
+          el('td', null, [document.createTextNode(it.name || ''), el('div', { cls: 'small', text: it.key_specs || '' })]),
+          el('td', { text: ((it.quantity || '') + ' ' + (it.unit || '')).trim() }),
+          el('td', { cls: 'num', text: money(it.total_min) + ' – ' + money(it.total_max) }),
+          el('td', { cls: 'small', text: it.price_basis || '' }),
+        ])));
+        est.appendChild(el('table', { cls: 'table tender-table an-table' }, [
+          el('thead', null, [el('tr', null, [el('th', { text: 'Оборудование' }), el('th', { text: 'Кол-во' }), el('th', { text: 'Стоимость' }), el('th', { text: 'Основа цены' })])]),
+          body,
+        ]));
+      }
+      if (e.installation_required && e.installation_scope) est.appendChild(kv('Работы по монтажу', e.installation_scope));
+      if (e.risks && e.risks.length) {
+        const ul = el('ul', { cls: 'req-list' });
+        e.risks.forEach((x) => ul.appendChild(el('li', { text: x })));
+        est.appendChild(el('div', { cls: 'tender-list' }, [el('h3', { text: 'Риски' }), ul]));
+      }
+      if (e.reasoning) est.appendChild(el('div', { cls: 'an-reasoning', text: e.reasoning }));
+      est.appendChild(el('div', { cls: 'small', text: 'Цены ориентировочные — проверьте у поставщиков.' }));
+    }
+
+    const steps = (st && st.steps) || {};
+    [['files', 'step-files'], ['analysis', 'step-analysis'], ['match', 'step-match'], ['estimate', 'step-estimate'], ['docs', 'step-docs']]
+      .forEach(([key, id]) => {
+        const section = $(id);
+        const info = steps[key] || {};
+        ['is-running', 'is-done', 'is-error', 'is-skipped'].forEach((c) => section.classList.remove(c));
+        if (info.status) section.classList.add('is-' + info.status);
+        let note = section.querySelector('.step-note');
+        if (!note) {
+          note = el('span', { cls: 'step-note' });
+          section.querySelector('.step-head').appendChild(note);
+        }
+        const label = { running: '◌ выполняется', done: '✓ готово', error: '✕ ошибка', skipped: '— пропущено' }[info.status] || '';
+        note.textContent = label + (info.note ? ': ' + info.note : '');
+        note.title = info.note || '';
+      });
+
     const docs = $('tender-docs');
     docs.textContent = '';
     (st && st.documents || []).forEach((path) => {
@@ -404,12 +465,30 @@
     });
 
     const hasP = !!p;
-    ['tender-fetch', 'tender-pick', 'tender-clear', 'tender-analyze', 'tender-open-folder'].forEach((id) => ($(id).disabled = !hasP));
+    ['tender-fetch', 'tender-pick', 'tender-clear', 'tender-analyze', 'tender-open-folder', 'tender-run-all'].forEach((id) => ($(id).disabled = !hasP));
     $('tender-match').disabled = !(a && a.positions && a.positions.length);
     $('tender-build').disabled = !a;
   }
 
+  let timerStart = 0;
+  let timerId = null;
+  function tickTimer() {
+    const sec = Math.floor((Date.now() - timerStart) / 1000);
+    $('tender-timer').textContent = '⏱ ' + String(Math.floor(sec / 60)).padStart(2, '0') + ':' + String(sec % 60).padStart(2, '0');
+  }
+  function setTimer(busy) {
+    if (busy && !timerId) {
+      timerStart = Date.now();
+      tickTimer();
+      timerId = setInterval(tickTimer, 1000);
+    } else if (!busy && timerId) {
+      clearInterval(timerId);
+      timerId = null;
+    }
+  }
+
   function setTenderStatus(text, busy, isError) {
+    setTimer(busy);
     const s = $('tender-status');
     s.textContent = text || '';
     s.classList.toggle('error', !!isError);
@@ -433,6 +512,7 @@
     }
   });
   $('tender-fetch').addEventListener('click', () => api() && api().tender_fetch_docs());
+  $('tender-run-all').addEventListener('click', () => api() && api().tender_run_all());
   $('tender-pick').addEventListener('click', () => api() && api().tender_pick_files());
   $('tender-clear').addEventListener('click', () => api() && api().tender_clear_files());
   $('tender-analyze').addEventListener('click', () => api() && api().tender_analyze());
@@ -647,6 +727,8 @@
     $('fz44').checked = p.fz44 !== false;
     $('fz223').checked = p.fz223 !== false;
     $('only-active').checked = p.only_active !== false;
+    $('strict').checked = p.strict !== false;
+    if (Array.isArray(p.minus_words)) $('minus-words').value = p.minus_words.join(', ');
     $('price-from').value = p.price_from || '';
     $('price-to').value = p.price_to || '';
     renderTags();
@@ -709,6 +791,8 @@
     voice.title = st.voice_error || '';
     $('eleven-status').textContent = st.has_eleven_key ? 'Ключ ElevenLabs сохранён.' : 'Ключ ElevenLabs не задан.';
     renderIntegrations(st);
+    const pc = (st.config && st.config.procurement) || {};
+    if (!Array.isArray(pc.minus_words)) $('minus-words').value = (st.default_minus_words || []).join(', ');
     $('key-status').textContent = st.has_key ? 'Ключ сохранён.' : 'Ключ не задан — работают только простые команды.';
   }
 
@@ -811,7 +895,7 @@
           break;
         case 'tender_state':
           renderTender(p.state);
-          setTenderStatus(p.status, false, false);
+          setTenderStatus(p.status, !!p.busy, false);
           break;
         case 'tender_status':
           setTenderStatus(p.text, !!p.busy, !!p.error);

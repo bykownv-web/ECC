@@ -9,6 +9,7 @@ from typing import Any, Callable
 
 from . import pc_control, utilities
 from .config import Config, app_data_dir, documents_dir
+from .relevance import DEFAULT_MINUS_WORDS, parse_minus_words
 from .procurement import (
     ProcurementClient,
     ProcurementError,
@@ -182,6 +183,8 @@ class ToolBox:
                 price_from=settings.get("price_from") or None,
                 price_to=settings.get("price_to") or None,
                 pages_per_tag=int(settings.get("pages_per_tag", 1) or 1),
+                strict=bool(settings.get("strict", True)),
+                minus_words=parse_minus_words(settings.get("minus_words", DEFAULT_MINUS_WORDS)),
                 on_progress=lambda text: self._emit("procurement_status", {"text": text, "busy": True}),
             )
         finally:

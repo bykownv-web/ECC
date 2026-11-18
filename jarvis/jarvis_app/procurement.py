@@ -21,6 +21,7 @@ import requests
 from bs4 import BeautifulSoup, Tag
 
 from .certs import configure_session
+from .relevance import minus_hit, tag_matches
 
 BASE_URL = "https://zakupki.gov.ru"
 SEARCH_PATH = "/epz/order/extendedsearch/results.html"
@@ -296,6 +297,8 @@ class ProcurementClient:
         price_from: float | None = None,
         price_to: float | None = None,
         pages_per_tag: int = 1,
+        strict: bool = False,
+        minus_words: list[str] | None = None,
         on_progress: Callable[[str], None] | None = None,
     ) -> tuple[list[Purchase], list[str]]:
         """Ищет по каждому тегу и объединяет результаты без дублей.
@@ -304,6 +307,8 @@ class ProcurementClient:
         """
         merged: dict[str, Purchase] = {}
         errors: list[str] = []
+        off_topic = 0
+        minus_count: dict[str, int] = {}
         for tag in [t.strip() for t in tags if t and t.strip()]:
             for page in range(1, max(1, pages_per_tag) + 1):
                 if on_progress:
@@ -324,6 +329,13 @@ class ProcurementClient:
                     errors.append(f"{tag}: {exc}")
                     break
                 for item in found:
+                    if strict and not tag_matches(item.title, tag):
+                        off_topic += 1
+                        continue
+                    hit = minus_hit(item.title, minus_words or [])
+                    if hit:
+                        minus_count[hit] = minus_count.get(hit, 0) + 1
+                        continue
                     existing = merged.get(item.number)
                     if existing is None:
                         item.tags = [tag]
@@ -333,6 +345,11 @@ class ProcurementClient:
                 if len(found) < 50:
                     break
         items = list(merged.values())
+        if off_topic:
+            errors.append(f"Скрыто не по теме: {off_topic} (в названии нет слов тега)")
+        if minus_count:
+            top = ", ".join(f"«{k}» — {v}" for k, v in sorted(minus_count.items(), key=lambda kv: -kv[1])[:5])
+            errors.append(f"Скрыто по минус-словам: {sum(minus_count.values())} ({top})")
         if only_active:
             fresh = [p for p in items if is_actual(p)]
             removed = len(items) - len(fresh)

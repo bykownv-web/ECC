@@ -62,7 +62,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "only_active": True,
         "price_from": None,
         "price_to": None,
-        "pages_per_tag": 1,
+        "pages_per_tag": 2,
+        "strict": True,  # в названии закупки должны быть все слова тега
+        "minus_words": None,  # None — стандартный список (медицина, дороги, продукты и т.п.)
         "monitor_interval_min": 30,
         "ca_bundle": "",
     },

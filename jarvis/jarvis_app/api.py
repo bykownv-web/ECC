@@ -33,6 +33,7 @@ from .notify import (
     set_secret,
 )
 from .procurement import ProcurementError, summary_text
+from .relevance import DEFAULT_MINUS_WORDS
 from .tender import TenderError, TenderWorkspace
 from .tools import ToolBox, ToolError
 from .voice import Listener, Speaker, VoiceError
@@ -62,7 +63,7 @@ SETTINGS_KEYS = {
     "ai_provider", "ollama_url", "ollama_model",
 }
 AI_PROVIDERS = {"ollama", "claude", "none"}
-PROCUREMENT_KEYS = {"tags", "fz44", "fz223", "only_active", "price_from", "price_to", "pages_per_tag",
+PROCUREMENT_KEYS = {"strict", "minus_words", "tags", "fz44", "fz223", "only_active", "price_from", "price_to", "pages_per_tag",
                     "monitor_interval_min", "ca_bundle"}
 
 
@@ -152,6 +153,7 @@ class JarvisApi:
             "ai_ok": self._brain.has_ai(),
             "has_key": bool(get_api_key()),
             "has_eleven_key": bool(get_elevenlabs_key()),
+            "default_minus_words": DEFAULT_MINUS_WORDS,
             "telegram": self._telegram.status(),
             "email": self.email_status(),
             "voice_available": self._listener is not None,
@@ -389,18 +391,25 @@ class JarvisApi:
     def tender_state(self) -> dict[str, Any]:
         return self._tender.snapshot()
 
-    def tender_set_purchase(self, purchase: dict[str, Any]) -> dict[str, Any]:
+    def tender_set_purchase(self, purchase: dict[str, Any], auto: bool = True) -> dict[str, Any]:
+        """Выбор закупки. По умолчанию сразу запускается весь конвейер: документы → ТЗ → подбор → стоимость → Word."""
         try:
             self._tender.set_purchase(purchase or {})
-            return {"ok": True}
         except TenderError as exc:
             return {"ok": False, "text": str(exc)}
+        if auto:
+            self.tender_run_all()
+        return {"ok": True}
+
+    def tender_run_all(self) -> None:
+        self._tender_job(self._tender.run_pipeline, self._toolbox.procurement_client(), self._analyst.upsert_report)
 
     def tender_find(self, value: str) -> None:
         def job() -> None:
             self._emit("tender_status", {"text": "Ищу закупку в ЕИС…", "busy": True})
             purchase = self._tender.find_purchase(value, self._toolbox.procurement_client())
             self._tender.set_purchase(purchase)
+            self._tender.run_pipeline(self._toolbox.procurement_client(), self._analyst.upsert_report)
 
         self._tender_job(job)
 
@@ -422,7 +431,11 @@ class JarvisApi:
             "Все файлы (*.*)",
         ))
         if paths:
-            self._tender_job(self._tender.add_files, paths)
+            def job() -> None:
+                self._tender.add_files(paths)
+                self._tender.run_pipeline(self._toolbox.procurement_client(), self._analyst.upsert_report)
+
+            self._tender_job(job)
 
     def tender_clear_files(self) -> None:
         self._tender_job(self._tender.clear_files)

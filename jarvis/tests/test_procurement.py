@@ -170,3 +170,12 @@ def test_search_tags_hides_stale_when_only_active(monkeypatch):
     assert any("неактуальных закупок: 2" in e for e in errors)
     items, _ = client.search_tags(["проектор"], only_active=False)
     assert len(items) == 2
+
+
+def test_search_tags_strict_and_minus_words():
+    html = SAMPLE_HTML.replace("Поставка мультимедийного проектора для актового зала", "Поставка медицинского проектора для операционной")
+    client = FakeClient({"%D0%BF%D1%80%D0%BE": html})
+    items, errors = client.search_tags(["проектор"], only_active=False, strict=True, minus_words=["медицин"])
+    assert items == []
+    assert any("не по теме: 1" in e for e in errors)  # «Звуковое оборудование для театра» — не про проекторы
+    assert any("минус-словам: 1" in e and "медицин" in e for e in errors)

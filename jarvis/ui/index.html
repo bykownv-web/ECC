@@ -133,6 +133,7 @@
             <label class="check"><input type="checkbox" id="fz44" checked> 44-ФЗ</label>
             <label class="check"><input type="checkbox" id="fz223" checked> 223-ФЗ</label>
             <label class="check"><input type="checkbox" id="only-active" checked> Только подача заявок</label>
+            <label class="check" title="Закупка показывается, только если в её названии есть все слова тега"><input type="checkbox" id="strict" checked> Только точно по тегам</label>
           </div>
           <div class="field">
             <label for="price-from">НМЦК, ₽</label>
@@ -141,6 +142,10 @@
               <input id="price-to" type="number" min="0" placeholder="до">
             </div>
           </div>
+        </div>
+        <div class="field minus-field">
+          <label for="minus-words">Минус-слова — закупки с ними в названии скрываются (через запятую, достаточно начала слова)</label>
+          <textarea id="minus-words" rows="2" spellcheck="false"></textarea>
         </div>
         <div class="proc-actions">
           <button class="btn btn-primary" id="proc-search">▶ Найти</button>
@@ -196,7 +201,8 @@
           <li class="tp tp-2"><b>02</b><span>Документы ТЗ</span></li>
           <li class="tp tp-3"><b>03</b><span>Разбор</span></li>
           <li class="tp tp-4"><b>04</b><span>Подбор</span></li>
-          <li class="tp tp-5"><b>05</b><span>Заявка</span></li>
+          <li class="tp tp-5"><b>05</b><span>Стоимость</span></li>
+          <li class="tp tp-6"><b>06</b><span>Заявка</span></li>
         </ol>
         <div class="tender-grid">
           <section class="tender-step" id="step-purchase">
@@ -205,6 +211,10 @@
             <div class="inline">
               <input id="tender-number" type="text" placeholder="Номер закупки или ссылка на zakupki.gov.ru">
               <button class="btn" id="tender-find" type="button">Найти</button>
+            </div>
+            <div class="inline">
+              <button class="btn btn-primary" id="tender-run-all" type="button">▶ Выполнить всё автоматически</button>
+              <span id="tender-timer" class="tender-timer"></span>
             </div>
           </section>
 
@@ -243,8 +253,13 @@
             </table>
           </section>
 
+          <section class="tender-step wide" id="step-estimate">
+            <header class="step-head"><span class="step-num">05</span><h2>Стоимость и маржа</h2></header>
+            <div id="tender-estimate" class="tender-estimate empty-state">Появится после разбора ТЗ.</div>
+          </section>
+
           <section class="tender-step wide" id="step-docs">
-            <header class="step-head"><span class="step-num">05</span><h2>Документы заявки</h2>
+            <header class="step-head"><span class="step-num">06</span><h2>Документы заявки</h2>
               <button class="btn btn-primary" id="tender-build" type="button">▤ Сформировать</button></header>
             <ul id="tender-docs" class="file-list"></ul>
             <div class="inline">

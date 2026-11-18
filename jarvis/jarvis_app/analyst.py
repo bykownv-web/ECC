@@ -131,6 +131,22 @@ def compute_totals(estimate: dict[str, Any], nmck: float | None) -> dict[str, An
     return totals
 
 
+def estimate_costs(llm: Any, purchase: dict[str, Any], analysis: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Оценка себестоимости оборудования и монтажа по разбору ТЗ; итоги и маржа — в коде."""
+    from .tender import load_catalog
+
+    catalog = load_catalog()
+    context: dict[str, Any] = {"purchase": purchase, "analysis": analysis}
+    if catalog:
+        candidates: list[dict[str, Any]] = []
+        for pos in analysis.get("positions") or []:
+            candidates.extend(c for c in tender_ai._catalog_candidates(pos, catalog, limit=10) if c not in candidates)
+        context["catalog"] = candidates[:60]
+    estimate = llm.json(ESTIMATE_SYSTEM, json.dumps(context, ensure_ascii=False), ESTIMATE_SCHEMA)
+    price = purchase.get("price")
+    return estimate, compute_totals(estimate, float(price) if price else None)
+
+
 def format_report(report: dict[str, Any]) -> str:
     """Текстовый отчёт для Telegram и почты."""
     p = report["purchase"]
@@ -235,25 +251,25 @@ class Analyst:
                 raise ValueError("в документах нет текста (возможно, сканы)")
             analysis = tender_ai.analyze_tz(llm, text, on_progress=self._progress)
             report["analysis"] = analysis
-            from .tender import load_catalog
-
-            catalog = load_catalog()
-            context = {"purchase": purchase, "analysis": analysis}
-            if catalog:
-                candidates: list[dict[str, Any]] = []
-                for pos in analysis.get("positions") or []:
-                    candidates.extend(c for c in tender_ai._catalog_candidates(pos, catalog, limit=10) if c not in candidates)
-                context["catalog"] = candidates[:60]
             self._progress(f"Считаю стоимость № {purchase['number']}…")
-            estimate = llm.json(ESTIMATE_SYSTEM, json.dumps(context, ensure_ascii=False), ESTIMATE_SCHEMA)
-            report["estimate"] = estimate
-            report["totals"] = compute_totals(estimate, float(purchase["price"]) if purchase.get("price") else None)
+            report["estimate"], report["totals"] = estimate_costs(llm, purchase, analysis)
         except (ProcurementError, LLMError, ValueError, OSError) as exc:
             report["error"] = str(exc)
         (folder).mkdir(parents=True, exist_ok=True)
         (folder / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=1), encoding="utf-8")
         (folder / "Отчёт.txt").write_text(format_report(report), encoding="utf-8")
         return report
+
+    def upsert_report(self, report: dict[str, Any]) -> None:
+        """Отчёт из вкладки «Заявка» тоже показываем в «Аналитике» (заменяя старый по той же закупке)."""
+        number = report["purchase"].get("number")
+        scored = self.store.scores.get(str(number)) or {}
+        report.setdefault("score", scored.get("score"))
+        report.setdefault("score_reason", scored.get("reason", ""))
+        self.store.reports = [r for r in self.store.reports if r["purchase"].get("number") != number]
+        self.store.reports.insert(0, report)
+        self.store.save()
+        self._emit("analyst_state", self.snapshot())
 
     def run(self, purchases: list[Purchase], notify: bool = True) -> list[dict[str, Any]]:
         if not self._lock.acquire(blocking=False):

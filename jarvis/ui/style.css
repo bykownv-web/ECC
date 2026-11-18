@@ -860,7 +860,7 @@ ul.list li::before { content: ""; position: absolute; left: -14px; top: 0.6em; w
   margin: 0 0 var(--s4);
   padding: 0;
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   flex: none;
 }
 .tp {
@@ -896,18 +896,20 @@ ul.list li::before { content: ""; position: absolute; left: -14px; top: 0.6em; w
   height: 1px;
   background: repeating-linear-gradient(90deg, var(--line-strong) 0 4px, transparent 4px 7px);
 }
-.tp-5::after { display: none; }
+.tp-6::after { display: none; }
 /* шаг выполнен — подсветка по содержимому (Chromium :has) */
 #tab-tender:has(#tender-purchase:not(.empty-state)) .tp-1,
 #tab-tender:has(#tender-files li) .tp-2,
 #tab-tender:has(#tender-facts .fact) .tp-3,
 #tab-tender:has(#tender-matches tr) .tp-4,
-#tab-tender:has(#tender-docs li) .tp-5 { color: var(--text); }
+#tab-tender:has(#tender-estimate .fact) .tp-5,
+#tab-tender:has(#tender-docs li) .tp-6 { color: var(--text); }
 #tab-tender:has(#tender-purchase:not(.empty-state)) .tp-1 b,
 #tab-tender:has(#tender-files li) .tp-2 b,
 #tab-tender:has(#tender-facts .fact) .tp-3 b,
 #tab-tender:has(#tender-matches tr) .tp-4 b,
-#tab-tender:has(#tender-docs li) .tp-5 b {
+#tab-tender:has(#tender-estimate .fact) .tp-5 b,
+#tab-tender:has(#tender-docs li) .tp-6 b {
   color: #02121c;
   background: linear-gradient(135deg, var(--accent), var(--accent-2));
   box-shadow: none;
@@ -915,7 +917,8 @@ ul.list li::before { content: ""; position: absolute; left: -14px; top: 0.6em; w
 #tab-tender:has(#tender-purchase:not(.empty-state)) .tp-1::after,
 #tab-tender:has(#tender-files li) .tp-2::after,
 #tab-tender:has(#tender-facts .fact) .tp-3::after,
-#tab-tender:has(#tender-matches tr) .tp-4::after { background: linear-gradient(90deg, var(--accent), rgba(var(--accent-rgb), 0.3)); }
+#tab-tender:has(#tender-matches tr) .tp-4::after,
+#tab-tender:has(#tender-estimate .fact) .tp-5::after { background: linear-gradient(90deg, var(--accent), rgba(var(--accent-rgb), 0.3)); }
 
 .tender-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s4); }
 .tender-step {
@@ -1291,3 +1294,17 @@ ul.list li::before { content: ""; position: absolute; left: -14px; top: 0.6em; w
   .analyst-split { grid-template-columns: minmax(0, 1fr); }
   .an-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+
+/* ---------- конвейер заявки: состояния шагов ---------- */
+.step-note { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--muted); max-width: 55%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.step-head .btn + .step-note, .step-head .step-note + .btn { margin-left: var(--s2); }
+.tender-step.is-running { border-color: rgba(255, 181, 74, 0.55); box-shadow: inset 0 0 0 1px rgba(255, 181, 74, 0.25), 0 0 18px -6px rgba(255, 181, 74, 0.5); }
+.tender-step.is-running .step-note { color: var(--hot); animation: blink 1.4s ease-in-out infinite; }
+.tender-step.is-done .step-note { color: var(--accent-2); }
+.tender-step.is-error { border-color: rgba(255, 90, 118, 0.55); }
+.tender-step.is-error .step-note { color: var(--danger); white-space: normal; }
+.tender-step.is-skipped { opacity: 0.75; }
+.tender-timer { font-family: var(--mono); color: var(--hot); font-size: 13px; letter-spacing: 1px; }
+.tender-estimate { display: flex; flex-direction: column; gap: var(--s3); }
+.minus-field { margin-top: var(--s3); }
+.minus-field textarea { font-size: 12px; min-height: 44px; }

@@ -31,6 +31,11 @@ ANALYSIS_SCHEMA = _obj(
         "delivery_place": _STR,
         "delivery_terms": _STR,
         "deadline": _STR,
+        "contract_term": _STR,
+        "payment_terms": _STR,
+        "acceptance_terms": _STR,
+        "installation": _STR,
+        "penalties": _STR,
         "bid_security": _STR,
         "contract_security": _STR,
         "warranty": _STR,
@@ -62,6 +67,9 @@ ANALYSIS_SYSTEM = """Ты — специалист по госзакупкам (
 positions — каждая поставляемая позиция товара с количеством и ВСЕМИ требуемыми характеристиками
 в формулировке заказчика (например «не менее 5000 лм», «HDMI — наличие»).
 restrictions — запреты и ограничения (ПП РФ № 1875, нацрежим, СМП/СОНО и т.п.).
+delivery_terms — срок поставки (сколько дней, с какого момента, этапы); delivery_place — адрес;
+contract_term — срок действия контракта; payment_terms — срок и порядок оплаты; acceptance_terms — приёмка и
+экспертиза; installation — требуются ли монтаж, пусконаладка, обучение и что именно; penalties — штрафы и пени.
 Отвечай только JSON по схеме."""
 
 MATCH_SCHEMA = _obj(

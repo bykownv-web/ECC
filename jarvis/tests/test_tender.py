@@ -210,3 +210,60 @@ def test_ollama_json_request_shape(tmp_path):
     config = Config(tmp_path / "c.json")
     assert LLM(config, session=sess).json("SYS", "PROMPT", {"type": "object"}) == {"ok": True}
     assert sess.body["format"] == {"type": "object"} and sess.body["options"]["num_ctx"] >= 8192
+
+
+def test_pipeline_runs_all_steps_and_reports(tmp_path, monkeypatch):
+    from jarvis_app import analyst as an
+
+    monkeypatch.setattr("jarvis_app.tender.documents_dir", lambda: tmp_path / "docs")
+    config = Config(tmp_path / "c.json")
+    ws = TenderWorkspace(config, lambda e, p: None)
+    ws.set_purchase({"number": "0119300019826002251", "title": "Проекторы", "url": "https://zakupki.gov.ru/x", "price": 2_000_000.0})
+    tz = make_docx(tmp_path / "Техническое задание.docx")
+    monkeypatch.setattr("jarvis_app.tender.tender_docs.fetch_eis_documents", lambda client, url, dest: [tz])
+    estimate = {"equipment": [{"name": "Проектор", "quantity": 2, "unit": "шт", "key_specs": "", "unit_cost_min": 400000,
+                               "unit_cost_max": 500000, "price_basis": "оценка ИИ"}],
+                "installation_required": False, "installation_scope": "", "installation_cost_min": 0, "installation_cost_max": 0,
+                "other_costs": "", "risks": [], "recommendation": "участвовать", "reasoning": ""}
+
+    def handler(system, prompt):
+        if system == an.ESTIMATE_SYSTEM:
+            return estimate
+        if system.startswith("Ты — специалист по госзакупкам"):
+            return ANALYSIS
+        return {"matches": [{"position_index": 0, "catalog_id": "", "brand": "Epson", "model": "EB-L630U", "country": "",
+                             "compliance": "соответствует", "price": "", "offered_values": [], "notes": ""}]}
+
+    fake = FakeLLM([])
+    fake.json = lambda system, prompt, schema: handler(system, prompt)
+    monkeypatch.setattr("jarvis_app.tender.LLM", lambda cfg: fake)
+    monkeypatch.setattr("jarvis_app.analyst.LLM", lambda cfg: fake)
+    reports = []
+    ws.run_pipeline(client=None, on_report=reports.append)
+    steps = {k: v["status"] for k, v in ws.state["steps"].items()}
+    assert steps == {"files": "done", "analysis": "done", "match": "done", "estimate": "done", "docs": "done"}
+    assert ws.state["totals"]["cost_max"] == 1_000_000 and ws.state["totals"]["margin_min"] == 1_000_000
+    assert len(ws.state["documents"]) == 3
+    assert reports and reports[0]["purchase"]["number"] == "0119300019826002251"
+
+
+def test_pipeline_stops_on_missing_docs_and_is_cancelled_by_new_purchase(tmp_path, monkeypatch):
+    from jarvis_app.procurement import ProcurementError
+
+    monkeypatch.setattr("jarvis_app.tender.documents_dir", lambda: tmp_path / "docs")
+    ws = TenderWorkspace(Config(tmp_path / "c.json"), lambda e, p: None)
+    ws.set_purchase({"number": "1", "url": "https://zakupki.gov.ru/x"})
+
+    def no_docs(client, url, dest):
+        raise ProcurementError("файлов нет.")
+
+    monkeypatch.setattr("jarvis_app.tender.tender_docs.fetch_eis_documents", no_docs)
+    ws.run_pipeline(client=None)
+    assert ws.state["steps"]["files"]["status"] == "error" and "Выбрать файлы" in ws.state["steps"]["files"]["note"]
+
+
+def test_analysis_text_prioritizes_tz_and_trims_contract():
+    contract = "\n".join(["Общие положения договора " * 5] * 400 + ["Срок поставки: 30 дней", "Оплата в течение 7 дней"])
+    text = tender_docs.build_analysis_text([("Проект контракта.docx", contract), ("ТЗ.docx", "Проектор 6000 лм")])
+    assert text.index("ТЗ.docx") < text.index("Проект контракта.docx")
+    assert "Срок поставки: 30 дней" in text and "Общие положения" not in text

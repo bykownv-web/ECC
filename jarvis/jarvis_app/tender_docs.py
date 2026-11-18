@@ -16,6 +16,58 @@ SUPPORTED = {".docx", ".pdf", ".xlsx", ".xlsm", ".txt", ".csv", ".rtf", ".zip"}
 MAX_FILE_BYTES = 40 * 1024 * 1024
 MAX_FILES = 20
 MAX_TEXT_CHARS = 400_000
+ANALYSIS_CHARS = 40_000  # сколько текста отдаём ИИ: больше — дольше и не точнее
+CONTRACT_CHARS = 9_000
+
+_PRIORITY = [
+    (0, ("техническ", "тз", "описание объекта", "спецификац", "требования к", "характеристик")),
+    (1, ("извещ", "обоснован", "нмцк", "информационн", "документац", "инструкц")),
+    (3, ("проект контракт", "проект договор", "контракт", "договор")),
+]
+_CONTRACT_KEYS = re.compile(
+    r"(срок|поставк|оплат|приемк|приёмк|гарант|неустойк|штраф|пен[яи]|монтаж|пусконаладк|обучени|место|адрес|обеспечени)",
+    re.I,
+)
+
+
+def file_priority(name: str) -> int:
+    low = name.lower().replace("_", " ")
+    for prio, keys in _PRIORITY:
+        if any(k in low for k in keys):
+            return prio
+    return 2
+
+
+def contract_extract(text: str, limit: int = CONTRACT_CHARS) -> str:
+    """Из длинного проекта контракта берём только абзацы про сроки, оплату, приёмку, гарантию, штрафы, монтаж."""
+    picked: list[str] = []
+    total = 0
+    for para in text.split("\n"):
+        if _CONTRACT_KEYS.search(para):
+            picked.append(para.strip())
+            total += len(para)
+            if total > limit:
+                break
+    return "\n".join(picked)[:limit]
+
+
+def build_analysis_text(parts: list[tuple[str, str]], limit: int = ANALYSIS_CHARS) -> str:
+    """ТЗ и спецификации — первыми, затем извещение, потом прочее; проект контракта — выжимкой."""
+    ordered = sorted(parts, key=lambda p: file_priority(p[0]))
+    chunks: list[str] = []
+    total = 0
+    for name, text in ordered:
+        if file_priority(name) == 3:
+            text = contract_extract(text)
+        if not text.strip():
+            continue
+        room = limit - total
+        if room <= 500:
+            break
+        piece = text[:room]
+        chunks.append(f"===== Файл: {name} =====\n{piece}")
+        total += len(piece)
+    return "\n\n".join(chunks)
 
 
 @dataclass
@@ -141,7 +193,7 @@ def unpack_zip(path: Path, dest: Path) -> list[Path]:
 def process_files(paths: list[Path], work_dir: Path) -> tuple[list[TenderFile], str]:
     """Извлекает текст из файлов. Возвращает список файлов со статусом и общий текст."""
     files: list[TenderFile] = []
-    texts: list[str] = []
+    texts: list[tuple[str, str]] = []
     queue = list(paths)
     while queue and len(files) < MAX_FILES * 2:
         path = queue.pop(0)
@@ -159,7 +211,7 @@ def process_files(paths: list[Path], work_dir: Path) -> tuple[list[TenderFile], 
                 text = extract_text(path).strip()
                 item.chars = len(text)
                 if text:
-                    texts.append(f"===== Файл: {path.name} =====\n{text}")
+                    texts.append((path.name, text))
                     item.status = "текст извлечён"
                 else:
                     item.status = "текст не найден (возможно, скан — нужен файл с текстом)"
@@ -168,7 +220,7 @@ def process_files(paths: list[Path], work_dir: Path) -> tuple[list[TenderFile], 
         except Exception as exc:  # повреждённый файл не должен ронять разбор остальных
             item.status = f"ошибка чтения: {exc.__class__.__name__}"
         files.append(item)
-    return files, "\n\n".join(texts)[:MAX_TEXT_CHARS]
+    return files, build_analysis_text(texts)
 
 
 # ---------- ЕИС ----------
