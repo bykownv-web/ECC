@@ -1,18 +1,22 @@
 @echo off
-chcp 65001 >nul
+setlocal
 cd /d "%~dp0"
-if not exist ".venv\Scripts\python.exe" (
-  echo Сначала один раз запустите run.bat
-  pause
-  exit /b 1
-)
-".venv\Scripts\python.exe" -m pip install -r requirements-dev.txt
-".venv\Scripts\python.exe" -m PyInstaller --noconfirm --windowed --name Jarvis --add-data "ui;ui" --collect-submodules jarvis_app main.py
-if errorlevel 1 (
-  echo Сборка не удалась.
-  pause
-  exit /b 1
-)
-echo.
-echo Готово: dist\Jarvis\Jarvis.exe
+set "VPY=%~dp0.venv\Scripts\python.exe"
+if exist "%VPY%" goto build
+echo Run run.bat once first.
 pause
+exit /b 1
+
+:build
+"%VPY%" -m pip install -r "%~dp0requirements-dev.txt"
+"%VPY%" -m PyInstaller --noconfirm --windowed --name Jarvis --add-data "ui;ui" --collect-submodules jarvis_app "%~dp0main.py"
+if errorlevel 1 goto fail
+echo.
+echo Done: dist\Jarvis\Jarvis.exe
+pause
+exit /b 0
+
+:fail
+echo Build failed.
+pause
+exit /b 1

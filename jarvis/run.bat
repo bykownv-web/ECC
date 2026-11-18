@@ -1,30 +1,31 @@
 @echo off
-chcp 65001 >nul
+setlocal
 cd /d "%~dp0"
 
-where py >/dev/null 2>nul
-if errorlevel 1 (
-  echo Python не найден. Установите Python 3.12 с python.org и отметьте "Add python.exe to PATH".
-  pause
-  exit /b 1
-)
+set "VPY=%~dp0.venv\Scripts\python.exe"
+set "VPYW=%~dp0.venv\Scripts\pythonw.exe"
 
-if not exist ".venv\Scripts\python.exe" (
-  echo Первый запуск: создаю окружение и ставлю библиотеки, это займёт пару минут...
-  py -3.12 -m venv .venv 2>/dev/null || py -3 -m venv .venv
-  if errorlevel 1 (
-    echo Не удалось создать окружение Python.
-    pause
-    exit /b 1
-  )
-  ".venv\Scripts\python.exe" -m pip install --upgrade pip
-  ".venv\Scripts\python.exe" -m pip install -r requirements.txt
-  if errorlevel 1 (
-    echo Ошибка установки библиотек. Пришлите текст ошибки выше.
-    rmdir /s /q .venv
-    pause
-    exit /b 1
-  )
-)
+if exist "%VPY%" goto run
 
-start "" ".venv\Scripts\pythonw.exe" main.py
+echo First run: creating Python 3.12 environment and installing libraries (2-3 minutes)...
+py -3.12 -m venv "%~dp0.venv"
+if errorlevel 1 goto novenv
+if not exist "%VPY%" goto novenv
+"%VPY%" -m pip install --upgrade pip
+"%VPY%" -m pip install -r "%~dp0requirements.txt"
+if errorlevel 1 goto noinstall
+
+:run
+start "" "%VPYW%" "%~dp0main.py"
+exit /b 0
+
+:novenv
+echo ERROR: could not create the environment. Is Python 3.12 installed? Check with: py -0
+pause
+exit /b 1
+
+:noinstall
+echo ERROR: library installation failed. Send the error text above.
+rmdir /s /q "%~dp0.venv"
+pause
+exit /b 1
