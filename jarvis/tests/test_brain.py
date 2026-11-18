@@ -13,6 +13,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(brain_mod, "get_api_key", lambda: "sk-ant-test")
     events = []
     config = Config(tmp_path / "config.json")
+    config.update({"ai_provider": "claude"})
     toolbox = ToolBox(config, lambda e, p: events.append((e, p)))
     return config, toolbox, events
 

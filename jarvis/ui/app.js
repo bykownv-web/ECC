@@ -275,6 +275,9 @@
     $('eleven-voice').value = known ? eid : 'custom';
     $('eleven-custom').value = known ? '' : eid;
     updateVoiceUi();
+    $('ai-provider').value = cfg.ai_provider || 'ollama';
+    $('ollama-model').value = cfg.ollama_model || 'qwen2.5:7b';
+    updateAiUi();
     $('model').value = cfg.model || 'claude-opus-5-5';
     $('effort').value = cfg.effort || 'low';
     $('apps').value = Object.entries(cfg.apps || {}).map(([k, v]) => k + ' = ' + v).join('\n');
@@ -290,6 +293,21 @@
     $('price-to').value = p.price_to || '';
     renderTags();
   }
+
+  function updateAiUi() {
+    const p = $('ai-provider').value;
+    $('ollama-box').style.display = p === 'ollama' ? 'flex' : 'none';
+    $('claude-box').style.display = p === 'claude' ? 'flex' : 'none';
+  }
+  $('ai-provider').addEventListener('change', updateAiUi);
+
+  $('check-ollama').addEventListener('click', async () => {
+    if (!api()) return;
+    await api().save_settings({ ai_provider: 'ollama', ollama_model: $('ollama-model').value.trim() || 'qwen2.5:7b' });
+    const res = await api().check_ollama();
+    $('ollama-status').textContent = res.text;
+    applyState(await api().get_state());
+  });
 
   function updateVoiceUi() {
     $('eleven-box').style.display = $('tts-voice').value === 'elevenlabs' ? 'flex' : 'none';
@@ -325,8 +343,8 @@
     state.config = st.config;
     fillSettings(st.config);
     const ai = $('ai-pill');
-    ai.textContent = st.has_key ? 'ИИ: Claude' : 'ИИ: простой режим';
-    ai.className = 'pill ' + (st.has_key ? 'ok' : 'off');
+    ai.textContent = st.ai_label;
+    ai.className = 'pill ' + (st.ai_ok ? 'ok' : 'off');
     const voice = $('voice-pill');
     voice.textContent = st.voice_available ? 'Голос: готов' : 'Голос: нет';
     voice.className = 'pill ' + (st.voice_available ? 'ok' : 'off');
@@ -374,6 +392,8 @@
       tts_pitch: $('tts-pitch').value,
       tts_rate: $('tts-rate').value,
       eleven_voice_id: elevenVoiceId(),
+      ai_provider: $('ai-provider').value,
+      ollama_model: $('ollama-model').value.trim() || 'qwen2.5:7b',
       model: $('model').value,
       effort: $('effort').value,
       apps: apps,

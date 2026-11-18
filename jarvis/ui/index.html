@@ -128,7 +128,28 @@
       <div class="tab-body" id="tab-settings">
         <form id="settings-form" class="settings">
           <fieldset>
-            <legend>Claude (умный режим)</legend>
+            <legend>ИИ (умный режим)</legend>
+            <label for="ai-provider">Кто думает за Джарвиса</label>
+            <select id="ai-provider">
+              <option value="ollama">Ollama — бесплатно, на этом компьютере</option>
+              <option value="claude">Claude — платно, по ключу Anthropic</option>
+              <option value="none">Без ИИ — только простые команды</option>
+            </select>
+            <div id="ollama-box" class="eleven-box">
+              <label for="ollama-model">Модель Ollama</label>
+              <div class="inline">
+                <input id="ollama-model" type="text" list="ollama-models" placeholder="qwen2.5:7b">
+                <button class="btn" type="button" id="check-ollama">Проверить</button>
+              </div>
+              <datalist id="ollama-models">
+                <option value="qwen2.5:7b">
+                <option value="qwen2.5:3b">
+                <option value="qwen2.5:14b">
+                <option value="llama3.1:8b">
+              </datalist>
+              <div id="ollama-status" class="hint">qwen2.5:7b — для ПК от 16 ГБ памяти, qwen2.5:3b — для слабых ПК.</div>
+            </div>
+            <div id="claude-box" class="eleven-box">
             <label for="api-key">API-ключ Anthropic</label>
             <div class="inline">
               <input id="api-key" type="password" autocomplete="off" placeholder="sk-ant-… (хранится в диспетчере учётных данных Windows)">
@@ -147,6 +168,7 @@
               <option value="medium">Обычно (medium)</option>
               <option value="high">Тщательно (high)</option>
             </select>
+            </div>
           </fieldset>
           <fieldset>
             <legend>Помощник</legend>

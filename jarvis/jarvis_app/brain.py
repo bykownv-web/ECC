@@ -1,4 +1,4 @@
-"""«Мозг» Джарвиса: Claude с инструментами, а без ключа — локальные команды."""
+"""«Мозг» Джарвиса: Claude или бесплатная локальная модель Ollama с инструментами, а без ИИ — простые команды."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 from .config import Config, get_api_key
 from .local_commands import parse_command
+from .ollama_brain import OllamaChat, OllamaError
 from .procurement import analyze, format_money
 from .tools import TOOL_DEFINITIONS, ToolBox, ToolError
 
@@ -35,13 +36,40 @@ class Brain:
         self._lock = threading.Lock()
         self._client = None
         self._client_key = ""
+        self._ollama: OllamaChat | None = None
+        self._ollama_sig: tuple[str, str, str] | None = None
 
     def reset(self) -> None:
         with self._lock:
             self._messages = []
+            if self._ollama is not None:
+                self._ollama.reset()
+
+    def provider(self) -> str:
+        return str(self._config.get("ai_provider", "ollama"))
 
     def has_ai(self) -> bool:
-        return bool(get_api_key())
+        provider = self.provider()
+        if provider == "ollama":
+            return True
+        return provider == "claude" and bool(get_api_key())
+
+    def _system_prompt(self) -> str:
+        return SYSTEM_PROMPT.format(
+            name=self._config.get("assistant_name", "Джарвис"),
+            user=self._config.get("user_name", "сэр"),
+        )
+
+    def _get_ollama(self) -> OllamaChat:
+        sig = (
+            str(self._config.get("ollama_url", "")),
+            str(self._config.get("ollama_model", "")),
+            self._system_prompt(),
+        )
+        if self._ollama is None or sig != self._ollama_sig:
+            self._ollama = OllamaChat(sig[0], sig[1], sig[2], self._toolbox, on_tool=self._on_tool)
+            self._ollama_sig = sig
+        return self._ollama
 
     def _get_client(self):
         key = get_api_key()
@@ -58,7 +86,17 @@ class Brain:
         text = (text or "").strip()
         if not text:
             return ""
-        client = self._get_client()
+        provider = self.provider()
+        if provider == "ollama":
+            with self._lock:
+                try:
+                    return self._get_ollama().ask(text)
+                except OllamaError as exc:
+                    # Простые команды работают и без модели.
+                    if parse_command(text) is not None:
+                        return self._local(text)
+                    return str(exc)
+        client = self._get_client() if provider == "claude" else None
         if client is None:
             return self._local(text)
         with self._lock:
@@ -69,9 +107,9 @@ class Brain:
         parsed = parse_command(text)
         if parsed is None:
             return (
-                "Без API-ключа Claude я понимаю только простые команды: время, погода, «открой блокнот», "
+                "Без ИИ я понимаю только простые команды: время, погода, «открой блокнот», "
                 "«громче», «напомни через 10 минут…», «найди закупки проектор». "
-                "Добавьте ключ в настройках, чтобы я понимал любые вопросы."
+                "Включите в настройках бесплатный ИИ Ollama или Claude, чтобы я понимал любые вопросы."
             )
         name, args = parsed
         if self._on_tool:
@@ -92,10 +130,7 @@ class Brain:
     def _ask_claude(self, client, text: str) -> str:
         import anthropic
 
-        system = SYSTEM_PROMPT.format(
-            name=self._config.get("assistant_name", "Джарвис"),
-            user=self._config.get("user_name", "сэр"),
-        )
+        system = self._system_prompt()
         history_len = len(self._messages)
         self._messages.append({"role": "user", "content": text})
         try:

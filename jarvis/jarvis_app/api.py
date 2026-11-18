@@ -43,7 +43,9 @@ TOOL_LABELS = {
 SETTINGS_KEYS = {
     "assistant_name", "user_name", "model", "effort", "voice_enabled", "wake_word", "city", "apps",
     "tts_voice", "tts_rate", "tts_pitch", "eleven_voice_id",
+    "ai_provider", "ollama_url", "ollama_model",
 }
+AI_PROVIDERS = {"ollama", "claude", "none"}
 PROCUREMENT_KEYS = {"tags", "fz44", "fz223", "only_active", "price_from", "price_to", "pages_per_tag",
                     "monitor_interval_min", "ca_bundle"}
 
@@ -106,6 +108,8 @@ class JarvisApi:
         cfg = self._config.as_dict()
         return {
             "config": cfg,
+            "ai_label": self._ai_label(),
+            "ai_ok": self._brain.has_ai(),
             "has_key": bool(get_api_key()),
             "has_eleven_key": bool(get_elevenlabs_key()),
             "voice_available": self._listener is not None,
@@ -114,15 +118,37 @@ class JarvisApi:
             "greeting": self._greeting(),
         }
 
+    def _ai_label(self) -> str:
+        provider = self._brain.provider()
+        if provider == "ollama":
+            return f"ИИ: Ollama ({self._config.get('ollama_model', '')})"
+        if provider == "claude" and get_api_key():
+            return "ИИ: Claude"
+        return "ИИ: простой режим"
+
     def _greeting(self) -> str:
         user = self._config.get("user_name", "сэр")
-        if get_api_key():
+        if self._brain.has_ai():
             return f"Системы в норме. Чем могу помочь, {user}?"
-        return f"Здравствуйте, {user}. Работаю в простом режиме — добавьте ключ Claude в настройках."
+        return f"Здравствуйте, {user}. Работаю в простом режиме — включите ИИ в настройках."
+
+    def check_ollama(self) -> dict[str, Any]:
+        from .ollama_brain import list_models
+
+        models = list_models(str(self._config.get("ollama_url", "")))
+        if not models:
+            return {"ok": False, "models": [], "text": "Ollama не отвечает. Установите и запустите её (см. README)."}
+        current = self._config.get("ollama_model", "")
+        note = "" if current in models else f" Модель {current} не скачана: ollama pull {current}"
+        return {"ok": True, "models": models, "text": "Ollama работает. Модели: " + ", ".join(models) + "." + note}
 
     def save_settings(self, values: dict[str, Any]) -> dict[str, Any]:
         values = values or {}
         clean: dict[str, Any] = {k: v for k, v in values.items() if k in SETTINGS_KEYS}
+        if "ai_provider" in clean and clean["ai_provider"] not in AI_PROVIDERS:
+            clean.pop("ai_provider")
+        if "ollama_url" in clean and not str(clean["ollama_url"]).startswith(("http://", "https://")):
+            clean.pop("ollama_url")
         if isinstance(clean.get("apps"), dict):
             clean["apps"] = {
                 str(k).strip().lower(): str(v).strip()

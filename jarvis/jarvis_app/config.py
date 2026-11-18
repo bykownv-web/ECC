@@ -21,6 +21,9 @@ KEYRING_ELEVEN = "elevenlabs-api-key"
 DEFAULT_CONFIG: dict[str, Any] = {
     "assistant_name": "Джарвис",
     "user_name": "сэр",
+    "ai_provider": "ollama",  # ollama — бесплатно на этом ПК; claude — по ключу; none — без ИИ
+    "ollama_url": "http://127.0.0.1:11434",
+    "ollama_model": "qwen2.5:7b",
     "model": "claude-opus-5-5",
     "effort": "low",
     "voice_enabled": True,
