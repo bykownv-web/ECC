@@ -1,7 +1,7 @@
 """Голос: распознавание речи (SpeechRecognition + Google, русский) и озвучка.
 
-Озвучка по умолчанию — нейросетевой голос Microsoft (edge-tts, нужен интернет), мужской
-«Дмитрий» с чуть пониженным тоном. Звук проигрывается встроенным в Windows MCI, без
+Озвучка: ElevenLabs (по ключу пользователя) или нейросетевой голос Microsoft (edge-tts),
+мужской «Дмитрий» с чуть пониженным тоном; оба требуют интернет. Звук проигрывается встроенным в Windows MCI, без
 дополнительных библиотек. Если нейросетевой голос недоступен, используется системный
 голос Windows (System.Speech) в отдельном процессе PowerShell; текст передаётся через
 переменную окружения, а не через командную строку.
@@ -25,10 +25,21 @@ IS_WINDOWS = platform.system() == "Windows"
 CREATE_NO_WINDOW = 0x08000000
 
 VOICES = {
+    "elevenlabs": "ElevenLabs (нужен ключ ElevenLabs)",
     "ru-RU-DmitryNeural": "Дмитрий — мужской, нейросетевой",
     "ru-RU-SvetlanaNeural": "Светлана — женский, нейросетевой",
     "sapi": "Системный голос Windows (без интернета)",
 }
+
+# Готовые (premade) голоса ElevenLabs. Это оригинальные голоса сервиса, а не копии чьих-то голосов.
+ELEVEN_VOICES = {
+    "onwK4e9ZLuTAKqWW03F9": "Daniel — британский, сдержанный",
+    "JBFqnCBsd6RMkjVDRZzb": "George — британский, тёплый, низкий",
+}
+ELEVEN_DEFAULT_VOICE = "onwK4e9ZLuTAKqWW03F9"
+ELEVEN_MODEL = "eleven_multilingual_v2"
+ELEVEN_URL = "https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+_VOICE_ID_RE = re.compile(r"[A-Za-z0-9]{10,40}")
 
 _TTS_SCRIPT = r"""
 Add-Type -AssemblyName System.Speech
@@ -48,21 +59,49 @@ def _mci(command: str, check: bool = False) -> str:
     return buf.value
 
 
+def _temp_mp3() -> Path:
+    return Path(tempfile.gettempdir()) / f"jarvis_tts_{uuid.uuid4().hex}.mp3"
+
+
+def _play_mp3(path: Path, stop: threading.Event) -> None:
+    alias = f"jarvis{uuid.uuid4().hex[:8]}"
+    _mci(f'open "{path}" type mpegvideo alias {alias}', check=True)
+    try:
+        _mci(f"play {alias}", check=True)
+        while not stop.wait(0.1):
+            if _mci(f"status {alias} mode") != "playing":
+                break
+    finally:
+        _mci(f"stop {alias}")
+        _mci(f"close {alias}")
+
+
+class TTSError(Exception):
+    pass
+
+
 class Speaker:
     def __init__(self) -> None:
         self.enabled = True
         self.voice = "ru-RU-DmitryNeural"
         self.rate = "+0%"
         self.pitch = "-8Hz"
+        self.eleven_voice_id = ELEVEN_DEFAULT_VOICE
+        self.eleven_key: Callable[[], str] = lambda: ""
+        self.on_error: Callable[[str], None] | None = None
+        self._last_error = ""
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._proc: subprocess.Popen[bytes] | None = None
         self._lock = threading.Lock()
 
-    def configure(self, voice: str, rate: str, pitch: str) -> None:
+    def configure(self, voice: str, rate: str, pitch: str, eleven_voice_id: str = "") -> None:
         self.voice = voice if voice in VOICES else "ru-RU-DmitryNeural"
         self.rate = rate if re.fullmatch(r"[+-]\d{1,3}%", rate or "") else "+0%"
         self.pitch = pitch if re.fullmatch(r"[+-]\d{1,3}Hz", pitch or "") else "-8Hz"
+        vid = (eleven_voice_id or "").strip()
+        self.eleven_voice_id = vid if _VOICE_ID_RE.fullmatch(vid) else ELEVEN_DEFAULT_VOICE
+        self._last_error = ""
 
     def say(self, text: str) -> None:
         text = (text or "").strip()
@@ -75,34 +114,78 @@ class Speaker:
             self._thread = threading.Thread(target=self._speak, args=(text[:3000], stop), daemon=True)
             self._thread.start()
 
+    def _report(self, message: str) -> None:
+        # Об одной и той же проблеме сообщаем один раз, а не после каждого ответа.
+        if message != self._last_error:
+            self._last_error = message
+            if self.on_error:
+                self.on_error(message)
+
     def _speak(self, text: str, stop: threading.Event) -> None:
-        if self.voice != "sapi":
+        """Пробует выбранный голос, затем запасные: ElevenLabs → Дмитрий → системный."""
+        chain: list[Callable[[str, threading.Event], None]] = []
+        if self.voice == "elevenlabs":
+            chain = [self._speak_elevenlabs, self._speak_neural]
+        elif self.voice != "sapi":
+            chain = [self._speak_neural]
+        for engine in chain:
             try:
-                self._speak_neural(text, stop)
+                engine(text, stop)
                 return
+            except TTSError as exc:
+                self._report(str(exc))
             except Exception:
-                if stop.is_set():
-                    return  # прервали — не переключаемся на запасной голос
+                pass
+            if stop.is_set():
+                return  # прервали — не переключаемся на запасной голос
         self._speak_sapi(text, stop)
+
+    def _speak_elevenlabs(self, text: str, stop: threading.Event) -> None:
+        import requests
+
+        key = self.eleven_key()
+        if not key:
+            raise TTSError("Голос ElevenLabs: не задан ключ. Добавьте его в настройках.")
+        try:
+            response = requests.post(
+                ELEVEN_URL.format(voice_id=self.eleven_voice_id),
+                params={"output_format": "mp3_44100_128"},
+                headers={"xi-api-key": key, "Accept": "audio/mpeg"},
+                json={
+                    "text": text,
+                    "model_id": ELEVEN_MODEL,
+                    "voice_settings": {"stability": 0.55, "similarity_boost": 0.75, "style": 0.15},
+                },
+                timeout=40,
+            )
+        except requests.RequestException as exc:
+            raise TTSError(f"Голос ElevenLabs недоступен ({exc.__class__.__name__}), говорю запасным.") from exc
+        if response.status_code == 401:
+            raise TTSError("Голос ElevenLabs: ключ не подошёл. Проверьте его в настройках.")
+        if response.status_code == 402 or (response.status_code == 403 and "quota" in response.text.lower()):
+            raise TTSError("Голос ElevenLabs: закончились кредиты на тарифе, говорю запасным голосом.")
+        if response.status_code == 404:
+            raise TTSError("Голос ElevenLabs: голос с таким ID не найден.")
+        if response.status_code != 200 or not response.content:
+            raise TTSError(f"Голос ElevenLabs: ошибка {response.status_code}, говорю запасным голосом.")
+        if stop.is_set():
+            return
+        path = _temp_mp3()
+        try:
+            path.write_bytes(response.content)
+            _play_mp3(path, stop)
+        finally:
+            path.unlink(missing_ok=True)
 
     def _speak_neural(self, text: str, stop: threading.Event) -> None:
         import edge_tts
 
-        path = Path(tempfile.gettempdir()) / f"jarvis_tts_{uuid.uuid4().hex}.mp3"
+        voice = self.voice if self.voice.endswith("Neural") else "ru-RU-DmitryNeural"
+        path = _temp_mp3()
         try:
-            asyncio.run(edge_tts.Communicate(text, self.voice, rate=self.rate, pitch=self.pitch).save(str(path)))
-            if stop.is_set():
-                return
-            alias = f"jarvis{uuid.uuid4().hex[:8]}"
-            _mci(f'open "{path}" type mpegvideo alias {alias}', check=True)
-            try:
-                _mci(f"play {alias}", check=True)
-                while not stop.wait(0.1):
-                    if _mci(f"status {alias} mode") != "playing":
-                        break
-            finally:
-                _mci(f"stop {alias}")
-                _mci(f"close {alias}")
+            asyncio.run(edge_tts.Communicate(text, voice, rate=self.rate, pitch=self.pitch).save(str(path)))
+            if not stop.is_set():
+                _play_mp3(path, stop)
         finally:
             try:
                 path.unlink(missing_ok=True)

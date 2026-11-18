@@ -197,6 +197,7 @@ textarea { resize: vertical; font-family: Consolas, monospace; font-size: 12px; 
 .settings label { font-size: 12px; color: var(--muted); margin-top: 4px; }
 .settings .check { color: var(--text); }
 .settings > .inline { grid-column: 1 / -1; }
+.eleven-box { display: flex; flex-direction: column; gap: 6px; border-top: 1px dashed var(--line); margin-top: 6px; padding-top: 6px; }
 
 .toast {
   position: fixed;

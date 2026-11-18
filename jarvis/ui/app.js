@@ -270,6 +270,11 @@
     $('tts-voice').value = cfg.tts_voice || 'ru-RU-DmitryNeural';
     $('tts-pitch').value = cfg.tts_pitch || '-8Hz';
     $('tts-rate').value = cfg.tts_rate || '+0%';
+    const eid = cfg.eleven_voice_id || 'onwK4e9ZLuTAKqWW03F9';
+    const known = Array.from($('eleven-voice').options).some((o) => o.value === eid);
+    $('eleven-voice').value = known ? eid : 'custom';
+    $('eleven-custom').value = known ? '' : eid;
+    updateVoiceUi();
     $('model').value = cfg.model || 'claude-opus-5-5';
     $('effort').value = cfg.effort || 'low';
     $('apps').value = Object.entries(cfg.apps || {}).map(([k, v]) => k + ' = ' + v).join('\n');
@@ -286,6 +291,36 @@
     renderTags();
   }
 
+  function updateVoiceUi() {
+    $('eleven-box').style.display = $('tts-voice').value === 'elevenlabs' ? 'flex' : 'none';
+    $('eleven-custom').style.display = $('eleven-voice').value === 'custom' ? 'block' : 'none';
+  }
+  $('tts-voice').addEventListener('change', updateVoiceUi);
+  $('eleven-voice').addEventListener('change', updateVoiceUi);
+
+  function elevenVoiceId() {
+    return $('eleven-voice').value === 'custom' ? $('eleven-custom').value.trim() : $('eleven-voice').value;
+  }
+
+  function voiceSettings() {
+    return {
+      tts_voice: $('tts-voice').value,
+      tts_pitch: $('tts-pitch').value,
+      tts_rate: $('tts-rate').value,
+      eleven_voice_id: elevenVoiceId(),
+    };
+  }
+
+  $('save-eleven-key').addEventListener('click', async () => {
+    if (!api()) return;
+    const res = await api().save_elevenlabs_key($('eleven-key').value);
+    toast(res.text);
+    if (res.ok) {
+      $('eleven-key').value = '';
+      applyState(await api().get_state());
+    }
+  });
+
   function applyState(st) {
     state.config = st.config;
     fillSettings(st.config);
@@ -296,6 +331,7 @@
     voice.textContent = st.voice_available ? 'Голос: готов' : 'Голос: нет';
     voice.className = 'pill ' + (st.voice_available ? 'ok' : 'off');
     voice.title = st.voice_error || '';
+    $('eleven-status').textContent = st.has_eleven_key ? 'Ключ ElevenLabs сохранён.' : 'Ключ ElevenLabs не задан.';
     $('key-status').textContent = st.has_key ? 'Ключ сохранён.' : 'Ключ не задан — работают только простые команды.';
   }
 
@@ -311,12 +347,7 @@
 
   $('test-voice').addEventListener('click', async () => {
     if (!api()) return;
-    await api().save_settings({
-      voice_enabled: true,
-      tts_voice: $('tts-voice').value,
-      tts_pitch: $('tts-pitch').value,
-      tts_rate: $('tts-rate').value,
-    });
+    await api().save_settings(Object.assign({ voice_enabled: true }, voiceSettings()));
     $('voice-enabled').checked = true;
     api().test_voice();
   });
@@ -342,6 +373,7 @@
       tts_voice: $('tts-voice').value,
       tts_pitch: $('tts-pitch').value,
       tts_rate: $('tts-rate').value,
+      eleven_voice_id: elevenVoiceId(),
       model: $('model').value,
       effort: $('effort').value,
       apps: apps,

@@ -161,6 +161,7 @@
             <label class="check"><input type="checkbox" id="voice-enabled"> Озвучивать ответы</label>
             <label for="tts-voice">Голос</label>
             <select id="tts-voice">
+              <option value="elevenlabs">ElevenLabs — студийное качество (нужен ключ)</option>
               <option value="ru-RU-DmitryNeural">Дмитрий — мужской, нейросетевой</option>
               <option value="ru-RU-SvetlanaNeural">Светлана — женский, нейросетевой</option>
               <option value="sapi">Системный голос Windows (без интернета)</option>
@@ -177,6 +178,21 @@
                 <option value="+10%">Быстрее</option>
               </select>
               <button class="btn" type="button" id="test-voice">▶ Проверить</button>
+            </div>
+            <div id="eleven-box" class="eleven-box">
+              <label for="eleven-voice">Голос ElevenLabs</label>
+              <select id="eleven-voice">
+                <option value="onwK4e9ZLuTAKqWW03F9">Daniel — британский, сдержанный</option>
+                <option value="JBFqnCBsd6RMkjVDRZzb">George — британский, тёплый, низкий</option>
+                <option value="custom">Свой голос по ID…</option>
+              </select>
+              <input id="eleven-custom" type="text" placeholder="Voice ID из вашей библиотеки ElevenLabs">
+              <label for="eleven-key">Ключ ElevenLabs</label>
+              <div class="inline">
+                <input id="eleven-key" type="password" autocomplete="off" placeholder="Ключ API (хранится в диспетчере учётных данных Windows)">
+                <button class="btn" type="button" id="save-eleven-key">Сохранить</button>
+              </div>
+              <div id="eleven-status" class="hint"></div>
             </div>
           </fieldset>
           <fieldset>

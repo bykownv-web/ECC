@@ -10,7 +10,14 @@ from urllib.parse import urlparse
 
 from . import __version__
 from .brain import Brain
-from .config import Config, app_data_dir, get_api_key, set_api_key
+from .config import (
+    Config,
+    app_data_dir,
+    get_api_key,
+    get_elevenlabs_key,
+    set_api_key,
+    set_elevenlabs_key,
+)
 from .procurement import ProcurementError
 from .tools import ToolBox, ToolError
 from .voice import Listener, Speaker, VoiceError
@@ -35,7 +42,7 @@ TOOL_LABELS = {
 
 SETTINGS_KEYS = {
     "assistant_name", "user_name", "model", "effort", "voice_enabled", "wake_word", "city", "apps",
-    "tts_voice", "tts_rate", "tts_pitch",
+    "tts_voice", "tts_rate", "tts_pitch", "eleven_voice_id",
 }
 PROCUREMENT_KEYS = {"tags", "fz44", "fz223", "only_active", "price_from", "price_to", "pages_per_tag",
                     "monitor_interval_min", "ca_bundle"}
@@ -56,6 +63,8 @@ class JarvisApi:
         self._toolbox = ToolBox(config, self._emit)
         self._brain = Brain(config, self._toolbox, on_tool=self._on_tool)
         self._speaker = Speaker()
+        self._speaker.eleven_key = get_elevenlabs_key
+        self._speaker.on_error = lambda text: self._emit("error", {"text": text})
         self._apply_voice_settings()
         self._busy = threading.Event()
         self._monitor_stop: threading.Event | None = None
@@ -98,6 +107,7 @@ class JarvisApi:
         return {
             "config": cfg,
             "has_key": bool(get_api_key()),
+            "has_eleven_key": bool(get_elevenlabs_key()),
             "voice_available": self._listener is not None,
             "voice_error": self._voice_error,
             "version": __version__,
@@ -137,6 +147,7 @@ class JarvisApi:
             str(self._config.get("tts_voice", "ru-RU-DmitryNeural")),
             str(self._config.get("tts_rate", "+0%")),
             str(self._config.get("tts_pitch", "-8Hz")),
+            str(self._config.get("eleven_voice_id", "")),
         )
 
     def test_voice(self) -> None:
@@ -153,6 +164,15 @@ class JarvisApi:
             return {"ok": False, "text": "Не удалось сохранить ключ в диспетчере учётных данных Windows."}
         self._brain.reset()
         return {"ok": True, "text": "Ключ сохранён." if key else "Ключ удалён."}
+
+    def save_elevenlabs_key(self, key: str) -> dict[str, Any]:
+        key = (key or "").strip()
+        if key and (len(key) < 20 or any(c.isspace() for c in key)):
+            return {"ok": False, "text": "Это не похоже на ключ ElevenLabs."}
+        if not set_elevenlabs_key(key):
+            return {"ok": False, "text": "Не удалось сохранить ключ в диспетчере учётных данных Windows."}
+        self._apply_voice_settings()
+        return {"ok": True, "text": "Ключ ElevenLabs сохранён." if key else "Ключ ElevenLabs удалён."}
 
     # ---------- разговор ----------
     def send_message(self, text: str) -> None:

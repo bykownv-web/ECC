@@ -16,6 +16,7 @@ from typing import Any
 APP_NAME = "Jarvis"
 KEYRING_SERVICE = "jarvis-assistant"
 KEYRING_USER = "anthropic-api-key"
+KEYRING_ELEVEN = "elevenlabs-api-key"
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "assistant_name": "Джарвис",
@@ -26,6 +27,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "tts_voice": "ru-RU-DmitryNeural",
     "tts_rate": "+0%",
     "tts_pitch": "-8Hz",
+    "eleven_voice_id": "onwK4e9ZLuTAKqWW03F9",
     "wake_word": "джарвис",
     "city": "Москва",
     "procurement": {
@@ -151,6 +153,34 @@ def set_api_key(value: str) -> bool:
         else:
             try:
                 keyring.delete_password(KEYRING_SERVICE, KEYRING_USER)
+            except Exception:
+                pass
+        return True
+    except Exception:
+        return False
+
+
+def get_elevenlabs_key() -> str:
+    try:
+        import keyring
+
+        stored = keyring.get_password(KEYRING_SERVICE, KEYRING_ELEVEN)
+        if stored:
+            return stored
+    except Exception:
+        pass
+    return os.environ.get("ELEVENLABS_API_KEY", "")
+
+
+def set_elevenlabs_key(value: str) -> bool:
+    try:
+        import keyring
+
+        if value:
+            keyring.set_password(KEYRING_SERVICE, KEYRING_ELEVEN, value)
+        else:
+            try:
+                keyring.delete_password(KEYRING_SERVICE, KEYRING_ELEVEN)
             except Exception:
                 pass
         return True
