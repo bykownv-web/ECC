@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import threading
 import traceback
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -19,6 +20,7 @@ from .config import (
     set_elevenlabs_key,
 )
 from .procurement import ProcurementError
+from .tender import TenderError, TenderWorkspace
 from .tools import ToolBox, ToolError
 from .voice import Listener, Speaker, VoiceError
 
@@ -40,6 +42,7 @@ TOOL_LABELS = {
     "system_info": "проверяю систему",
 }
 
+COMPANY_KEYS = {"name", "inn", "kpp", "ogrn", "address", "director", "director_position", "phone", "email"}
 SETTINGS_KEYS = {
     "assistant_name", "user_name", "model", "effort", "voice_enabled", "wake_word", "city", "apps",
     "tts_voice", "tts_rate", "tts_pitch", "eleven_voice_id",
@@ -63,6 +66,7 @@ class JarvisApi:
         self._config = config
         self._window = None
         self._toolbox = ToolBox(config, self._emit)
+        self._tender = TenderWorkspace(config, self._emit)
         self._brain = Brain(config, self._toolbox, on_tool=self._on_tool)
         self._speaker = Speaker()
         self._speaker.eleven_key = get_elevenlabs_key
@@ -173,6 +177,9 @@ class JarvisApi:
             }
         else:
             clean.pop("apps", None)
+        company = values.get("company")
+        if isinstance(company, dict):
+            clean["company"] = {k: str(v).strip()[:300] for k, v in company.items() if k in COMPANY_KEYS}
         proc = values.get("procurement")
         if isinstance(proc, dict):
             clean["procurement"] = {k: v for k, v in proc.items() if k in PROCUREMENT_KEYS}
@@ -316,12 +323,99 @@ class JarvisApi:
         except (ProcurementError, ToolError, OSError) as exc:
             return {"ok": False, "text": str(exc)}
 
-    def open_link(self, url: str) -> None:
+    def open_link(self, url: str) -> dict[str, Any]:
         parsed = urlparse(url or "")
-        if parsed.scheme == "https" and parsed.netloc.endswith("zakupki.gov.ru"):
+        if parsed.scheme in ("http", "https") and parsed.netloc.endswith("zakupki.gov.ru"):
             import webbrowser
 
-            webbrowser.open(parsed.geturl())
+            webbrowser.open(parsed._replace(scheme="https").geturl())
+            return {"ok": True}
+        return {"ok": False, "text": "Ссылка не на zakupki.gov.ru."}
+
+    # ---------- заявка (ТЗ, подбор, документы) ----------
+    def _tender_job(self, job, *args) -> None:
+        def work() -> None:
+            try:
+                job(*args)
+            except (TenderError, ProcurementError, ValueError) as exc:
+                self._emit("tender_status", {"text": str(exc), "busy": False, "error": True})
+            except Exception as exc:  # LLMError и прочее — показываем пользователю
+                from .llm import LLMError
+
+                if not isinstance(exc, LLMError):
+                    _log_error(exc)
+                self._emit("tender_status", {"text": str(exc) or exc.__class__.__name__, "busy": False, "error": True})
+
+        self._run_async(work)
+
+    def tender_state(self) -> dict[str, Any]:
+        return self._tender.snapshot()
+
+    def tender_set_purchase(self, purchase: dict[str, Any]) -> dict[str, Any]:
+        try:
+            self._tender.set_purchase(purchase or {})
+            return {"ok": True}
+        except TenderError as exc:
+            return {"ok": False, "text": str(exc)}
+
+    def tender_find(self, value: str) -> None:
+        def job() -> None:
+            self._emit("tender_status", {"text": "Ищу закупку в ЕИС…", "busy": True})
+            purchase = self._tender.find_purchase(value, self._toolbox.procurement_client())
+            self._tender.set_purchase(purchase)
+
+        self._tender_job(job)
+
+    def tender_fetch_docs(self) -> None:
+        self._tender_job(lambda: self._tender.fetch_from_eis(self._toolbox.procurement_client()))
+
+    def _pick_files(self, types: tuple[str, ...], multiple: bool = True) -> list[str]:
+        if self._window is None:
+            return []
+        import webview
+
+        mode = getattr(getattr(webview, "FileDialog", None), "OPEN", None) or getattr(webview, "OPEN_DIALOG", 10)
+        result = self._window.create_file_dialog(mode, allow_multiple=multiple, file_types=types)
+        return list(result or [])
+
+    def tender_pick_files(self) -> None:
+        paths = self._pick_files((
+            "Документы (*.docx;*.pdf;*.xlsx;*.rtf;*.txt;*.zip)",
+            "Все файлы (*.*)",
+        ))
+        if paths:
+            self._tender_job(self._tender.add_files, paths)
+
+    def tender_clear_files(self) -> None:
+        self._tender_job(self._tender.clear_files)
+
+    def tender_analyze(self) -> None:
+        self._tender_job(self._tender.analyze)
+
+    def tender_match(self) -> None:
+        self._tender_job(self._tender.match)
+
+    def tender_build_docs(self) -> None:
+        self._tender_job(self._tender.build_documents)
+
+    def tender_import_catalog(self) -> None:
+        paths = self._pick_files(("Excel (*.xlsx;*.xlsm)",), multiple=False)
+        if paths:
+            self._tender_job(self._tender.import_catalog, paths[0])
+
+    def tender_open(self, path: str = "") -> dict[str, Any]:
+        """Открывает папку заявки или один из созданных в ней файлов."""
+        import os
+
+        folder = self._tender.folder().resolve()
+        target = Path(path).resolve() if path else folder
+        if folder != target and folder not in target.parents:
+            return {"ok": False, "text": "Можно открыть только файлы заявки."}
+        try:
+            os.startfile(str(target))  # type: ignore[attr-defined]
+            return {"ok": True}
+        except (AttributeError, OSError) as exc:
+            return {"ok": False, "text": f"Не удалось открыть: {exc}"}
 
     def set_monitoring(self, enabled: bool) -> dict[str, Any]:
         if self._monitor_stop is not None:

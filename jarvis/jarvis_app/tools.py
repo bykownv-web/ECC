@@ -157,6 +157,9 @@ class ToolBox:
         self.seen = SeenStore(app_data_dir() / "seen_purchases.json")
 
     # ---------- закупки ----------
+    def procurement_client(self) -> ProcurementClient:
+        return self._client()
+
     def _client(self) -> ProcurementClient:
         return ProcurementClient(ca_bundle=self._config.get("procurement", {}).get("ca_bundle", ""))
 
@@ -185,11 +188,13 @@ class ToolBox:
             self._emit("procurement_status", {"text": "", "busy": False})
         with self._results_lock:
             self._results = found
+        notes = [e for e in errors if e.startswith("Скрыто")]
+        errors = [e for e in errors if not e.startswith("Скрыто")]
         self._emit(
             "procurement_results",
-            {"items": [p.to_dict() for p in found], "analytics": analyze(found), "errors": errors},
+            {"items": [p.to_dict() for p in found], "analytics": analyze(found), "errors": errors, "notes": notes},
         )
-        return found, errors
+        return found, errors + notes
 
     def last_results(self) -> list[Purchase]:
         with self._results_lock:

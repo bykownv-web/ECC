@@ -107,7 +107,7 @@ class FakeClient(pr.ProcurementClient):
 
 def test_search_tags_merges_duplicates_and_reports_errors():
     client = FakeClient({"%D0%BF%D1%80%D0%BE": SAMPLE_HTML, "%D0%B7%D0%B2": SAMPLE_HTML})
-    items, errors = client.search_tags(["проектор", "звук", "театр"])
+    items, errors = client.search_tags(["проектор", "звук", "театр"], only_active=False)
     assert len(items) == 2
     assert items[0].tags == ["проектор", "звук"]
     assert len(errors) == 1 and errors[0].startswith("театр")
@@ -146,3 +146,27 @@ def test_summary_text_mentions_numbers():
     text = pr.summary_text(pr.parse_results(SAMPLE_HTML))
     assert "Найдено закупок: 2" in text
     assert "0373100000126000001" in text
+
+
+def test_is_actual_filters_stale_and_wrong_stage():
+    today = date(2026, 11, 18)
+    ok = pr.Purchase(number="1", url="u", status="Подача заявок", deadline="20.11.2026")
+    past = pr.Purchase(number="2", url="u", status="Подача заявок", deadline="10.03.2024")
+    closed = pr.Purchase(number="3", url="u", status="Работа комиссии", deadline="25.11.2026")
+    no_date_old = pr.Purchase(number="4", url="u", status="Подача заявок", published="01.02.2023")
+    no_date_new = pr.Purchase(number="5", url="u", status="Подача заявок", updated="10.11.2026")
+    assert pr.is_actual(ok, today)
+    assert not pr.is_actual(past, today)
+    assert not pr.is_actual(closed, today)
+    assert not pr.is_actual(no_date_old, today)
+    assert pr.is_actual(no_date_new, today)
+
+
+def test_search_tags_hides_stale_when_only_active(monkeypatch):
+    stale = SAMPLE_HTML.replace("19.11.2026", "19.11.2020").replace("30.11.2026", "30.11.2020")
+    client = FakeClient({"%D0%BF%D1%80%D0%BE": stale})
+    items, errors = client.search_tags(["проектор"], only_active=True)
+    assert items == []
+    assert any("неактуальных закупок: 2" in e for e in errors)
+    items, _ = client.search_tags(["проектор"], only_active=False)
+    assert len(items) == 2

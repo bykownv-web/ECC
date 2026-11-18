@@ -227,7 +227,7 @@ class ProcurementClient:
         self._last_request = 0.0
         self._lock = threading.Lock()
 
-    def _get(self, url: str) -> str:
+    def _request(self, url: str) -> requests.Response:
         with self._lock:
             wait = DELAY_BETWEEN_REQUESTS - (time.monotonic() - self._last_request)
             if wait > 0:
@@ -250,8 +250,38 @@ class ProcurementClient:
             )
         if response.status_code != 200:
             raise ProcurementError(f"ЕИС вернула код {response.status_code}.")
+        return response
+
+    def _get(self, url: str) -> str:
+        response = self._request(url)
         response.encoding = response.encoding or "utf-8"
         return response.text
+
+    def get_text(self, url: str) -> str:
+        return self._get(url)
+
+    def get_file(self, url: str) -> tuple[bytes, str]:
+        """Скачивает файл. Возвращает (содержимое, имя файла из заголовка Content-Disposition)."""
+        response = self._request(url)
+        disposition = response.headers.get("Content-Disposition", "")
+        name = ""
+        match = re.search(r"filename\*=(?:UTF-8'')?([^;]+)", disposition, re.I)
+        if match:
+            from urllib.parse import unquote
+
+            name = unquote(match.group(1).strip('" '))
+        else:
+            match = re.search(r'filename="?([^";]+)"?', disposition, re.I)
+            if match:
+                raw = match.group(1)
+                try:  # ЕИС иногда отдаёт имя в cp1251, прочитанное как latin-1
+                    name = raw.encode("latin-1").decode("utf-8")
+                except (UnicodeEncodeError, UnicodeDecodeError):
+                    try:
+                        name = raw.encode("latin-1").decode("cp1251")
+                    except (UnicodeEncodeError, UnicodeDecodeError):
+                        name = raw
+        return response.content, name
 
     def search(self, params: SearchParams) -> list[Purchase]:
         return parse_results(self._get(build_search_url(params)))
@@ -302,7 +332,31 @@ class ProcurementClient:
                         existing.tags.append(tag)
                 if len(found) < 50:
                     break
-        return list(merged.values()), errors
+        items = list(merged.values())
+        if only_active:
+            fresh = [p for p in items if is_actual(p)]
+            removed = len(items) - len(fresh)
+            if removed:
+                errors.append(f"Скрыто неактуальных закупок: {removed} (срок подачи прошёл или этап не «Подача заявок»)")
+            items = fresh
+        return items, errors
+
+
+def is_actual(purchase: Purchase, today: date | None = None) -> bool:
+    """Закупка ещё принимает заявки: этап «Подача заявок» и срок не истёк.
+
+    ЕИС иногда оставляет старые закупки в этапе «Подача заявок», хотя срок давно прошёл.
+    """
+    today = today or date.today()
+    status = purchase.status.lower()
+    if status and "подач" not in status:
+        return False
+    deadline = parse_date(purchase.deadline)
+    if deadline is not None:
+        return deadline >= today
+    # Срок не указан: считаем актуальной, только если закупку обновляли за последние 60 дней.
+    touched = parse_date(purchase.updated) or parse_date(purchase.published)
+    return touched is not None and (today - touched).days <= 60
 
 
 def analyze(purchases: list[Purchase], today: date | None = None) -> dict[str, Any]:

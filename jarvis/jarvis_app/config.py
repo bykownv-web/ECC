@@ -33,6 +33,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "eleven_voice_id": "onwK4e9ZLuTAKqWW03F9",
     "wake_word": "джарвис",
     "city": "Москва",
+    # Реквизиты для документов заявки
+    "company": {
+        "name": "", "inn": "", "kpp": "", "ogrn": "", "address": "",
+        "director": "", "director_position": "Генеральный директор", "phone": "", "email": "",
+    },
     "procurement": {
         "tags": [
             "проектор",

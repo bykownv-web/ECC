@@ -253,11 +253,23 @@
     $('proc-empty').style.display = items.length ? 'none' : 'block';
     items.forEach((p) => {
       const link = el('a', { text: '№ ' + p.number, title: 'Открыть в ЕИС' });
-      link.addEventListener('click', () => api() && api().open_link(p.url));
+      link.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (api()) api().open_link(p.url);
+      });
       const left = daysLeft(p.deadline);
       const deadline = el('td', { cls: left !== null && left <= 3 && left >= 0 ? 'soon' : '', text: p.deadline || '—' });
       if (left !== null && left >= 0) deadline.appendChild(el('div', { cls: 'small', text: 'осталось дней: ' + left }));
-      const tr = el('tr', null, [
+      const work = el('button', { cls: 'btn btn-small', text: 'В работу', title: 'Подготовить заявку по этой закупке' });
+      work.type = 'button';
+      work.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (!api()) return;
+        const res = await api().tender_set_purchase(p);
+        if (res && res.ok === false) toast(res.text);
+        else switchTab('tender');
+      });
+      const tr = el('tr', { cls: 'row-link', title: 'Открыть закупку на zakupki.gov.ru' }, [
         el('td', null, [link, el('div', null, [el('span', { cls: 'law', text: p.law || '—' })]),
           el('div', { cls: 'small', text: p.method || '' })]),
         el('td', null, [el('div', { cls: 'clamp', text: p.title || '—', title: p.title || '' }),
@@ -265,7 +277,13 @@
         el('td', null, [el('div', { cls: 'clamp clamp-3', text: p.customer || '—', title: p.customer || '' })]),
         el('td', { cls: 'num', text: money(p.price) }),
         deadline,
+        el('td', { cls: 'row-actions' }, [work]),
       ]);
+      tr.addEventListener('click', (e) => {
+        if (e.target.closest('button')) return;
+        if (window.getSelection && String(window.getSelection())) return; // выделяют текст — не переходим
+        if (api()) api().open_link(p.url);
+      });
       body.appendChild(tr);
     });
   }
@@ -292,6 +310,141 @@
     });
   }
 
+
+  // ---------- заявка ----------
+  const tender = { state: null };
+
+  function kv(label, value) {
+    return el('div', { cls: 'fact' }, [el('div', { cls: 'fact-label', text: label }), el('div', { cls: 'fact-value', text: value || '—' })]);
+  }
+
+  function renderTender(st) {
+    tender.state = st;
+    const box = $('tender-purchase');
+    box.textContent = '';
+    const p = st && st.purchase;
+    box.classList.toggle('empty-state', !p);
+    if (!p) {
+      box.textContent = 'Нажмите «В работу» у закупки на вкладке «Закупки» или введите номер.';
+    } else {
+      const link = el('a', { text: '№ ' + p.number, title: 'Открыть на zakupki.gov.ru' });
+      link.addEventListener('click', () => api() && api().open_link(p.url));
+      box.appendChild(el('div', { cls: 'purchase-head' }, [link, el('span', { cls: 'law', text: p.law || '—' })]));
+      box.appendChild(el('div', { cls: 'purchase-title', text: p.title || '' }));
+      box.appendChild(el('div', { cls: 'purchase-meta' }, [
+        kv('Заказчик', p.customer), kv('НМЦК', money(p.price)), kv('Подача до', p.deadline),
+      ]));
+    }
+
+    const files = $('tender-files');
+    files.textContent = '';
+    (st && st.files || []).forEach((f) => {
+      const ok = /извлечён|архив/.test(f.status);
+      files.appendChild(el('li', { cls: ok ? 'ok' : 'bad' }, [
+        el('span', { cls: 'file-name', text: f.name }), el('span', { cls: 'file-status', text: f.status + (f.chars ? ' · ' + f.chars.toLocaleString('ru-RU') + ' симв.' : '') }),
+      ]));
+    });
+    $('tender-text-info').textContent = st && st.text_chars ? 'Текст ТЗ: ' + st.text_chars.toLocaleString('ru-RU') + ' символов' : 'Документы не загружены.';
+
+    const a = st && st.analysis;
+    const facts = $('tender-facts');
+    facts.textContent = '';
+    const lists = $('tender-lists');
+    lists.textContent = '';
+    const posBody = $('tender-positions');
+    posBody.textContent = '';
+    $('tender-positions-table').style.display = a && a.positions && a.positions.length ? '' : 'none';
+    if (a) {
+      [['Кратко', a.summary], ['Место поставки', a.delivery_place], ['Сроки поставки', a.delivery_terms],
+        ['Обеспечение заявки', a.bid_security], ['Обеспечение контракта', a.contract_security], ['Гарантия', a.warranty]]
+        .forEach(([k, v]) => facts.appendChild(kv(k, v)));
+      [['Ограничения', a.restrictions], ['Требования к участнику', a.participant_requirements], ['Документы в заявке', a.documents_required]]
+        .forEach(([title, items]) => {
+          const ul = el('ul', { cls: 'list' });
+          (items && items.length ? items : ['не найдено']).forEach((t) => ul.appendChild(el('li', { text: t })));
+          lists.appendChild(el('div', { cls: 'tender-list' }, [el('h3', { text: title }), ul]));
+        });
+      (a.positions || []).forEach((pos, i) => {
+        const reqs = el('ul', { cls: 'req-list' });
+        (pos.characteristics || []).forEach((c) => reqs.appendChild(el('li', { text: c.name + ': ' + (c.requirement || '—') })));
+        posBody.appendChild(el('tr', null, [
+          el('td', { text: String(i + 1) }), el('td', { text: pos.name }),
+          el('td', { text: ((pos.quantity || '') + ' ' + (pos.unit || '')).trim() || '—' }), el('td', null, [reqs]),
+        ]));
+      });
+    }
+
+    $('tender-catalog').textContent = st && st.catalog_count
+      ? 'Каталог поставщика: ' + st.catalog_count + ' позиций — подбор только из него.'
+      : 'Каталог не загружен — ИИ предложит модели сам (обязательно проверьте).';
+    const mBody = $('tender-matches');
+    mBody.textContent = '';
+    const matches = st && st.matches || [];
+    $('tender-matches-table').style.display = matches.length ? '' : 'none';
+    matches.forEach((m) => {
+      const cls = { 'соответствует': 'badge ok', 'частично': 'badge warn', 'не найдено': 'badge bad' }[m.compliance] || 'badge';
+      mBody.appendChild(el('tr', null, [
+        el('td', null, [document.createTextNode(m.position), el('div', { cls: 'small', text: ((m.quantity || '') + ' ' + (m.unit || '')).trim() })]),
+        el('td', null, [el('div', { text: [m.brand, m.model].filter(Boolean).join(' ') || '—' }),
+          el('div', { cls: 'small', text: (m.country || '') + (m.from_catalog ? ' · из каталога' : ' · предложение ИИ') })]),
+        el('td', null, [el('span', { cls: cls, text: m.compliance })]),
+        el('td', { cls: 'num', text: m.price || '—' }),
+        el('td', { cls: 'small', text: m.notes || '' }),
+      ]));
+    });
+
+    const docs = $('tender-docs');
+    docs.textContent = '';
+    (st && st.documents || []).forEach((path) => {
+      const name = path.split(/[\\/]/).pop();
+      const btn = el('button', { cls: 'btn btn-small', text: 'Открыть' });
+      btn.type = 'button';
+      btn.addEventListener('click', () => api() && api().tender_open(path));
+      docs.appendChild(el('li', { cls: 'ok' }, [el('span', { cls: 'file-name', text: '▤ ' + name }), btn]));
+    });
+
+    const hasP = !!p;
+    ['tender-fetch', 'tender-pick', 'tender-clear', 'tender-analyze', 'tender-open-folder'].forEach((id) => ($(id).disabled = !hasP));
+    $('tender-match').disabled = !(a && a.positions && a.positions.length);
+    $('tender-build').disabled = !a;
+  }
+
+  function setTenderStatus(text, busy, isError) {
+    const s = $('tender-status');
+    s.textContent = text || '';
+    s.classList.toggle('error', !!isError);
+    s.classList.toggle('busy', !!busy);
+    document.querySelectorAll('#tab-tender .btn').forEach((b) => {
+      if (busy) b.dataset.wasDisabled = b.disabled ? '1' : '';
+      if (busy) b.disabled = true;
+    });
+    if (!busy && tender.state) renderTender(tender.state);
+    else if (!busy) document.querySelectorAll('#tab-tender .btn').forEach((b) => (b.disabled = b.dataset.wasDisabled === '1'));
+  }
+
+  $('tender-find').addEventListener('click', () => {
+    const v = $('tender-number').value.trim();
+    if (v && api()) api().tender_find(v);
+  });
+  $('tender-number').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      $('tender-find').click();
+    }
+  });
+  $('tender-fetch').addEventListener('click', () => api() && api().tender_fetch_docs());
+  $('tender-pick').addEventListener('click', () => api() && api().tender_pick_files());
+  $('tender-clear').addEventListener('click', () => api() && api().tender_clear_files());
+  $('tender-analyze').addEventListener('click', () => api() && api().tender_analyze());
+  $('tender-match').addEventListener('click', () => api() && api().tender_match());
+  $('tender-build').addEventListener('click', () => api() && api().tender_build_docs());
+  $('tender-catalog-import').addEventListener('click', () => api() && api().tender_import_catalog());
+  $('tender-open-folder').addEventListener('click', async () => {
+    if (!api()) return;
+    const res = await api().tender_open('');
+    if (res && res.ok === false) toast(res.text);
+  });
+
   // ---------- настройки ----------
   function fillSettings(cfg) {
     $('assistant-name').value = cfg.assistant_name || '';
@@ -313,6 +466,10 @@
     $('model').value = cfg.model || 'claude-opus-5-5';
     $('effort').value = cfg.effort || 'low';
     $('apps').value = Object.entries(cfg.apps || {}).map(([k, v]) => k + ' = ' + v).join('\n');
+    const co = cfg.company || {};
+    [['co-name', 'name'], ['co-inn', 'inn'], ['co-kpp', 'kpp'], ['co-ogrn', 'ogrn'], ['co-address', 'address'],
+      ['co-director', 'director'], ['co-director-position', 'director_position'], ['co-phone', 'phone'], ['co-email', 'email']]
+      .forEach(([id, key]) => ($(id).value = co[key] || ''));
     const p = cfg.procurement || {};
     $('pages').value = p.pages_per_tag || 1;
     $('interval').value = p.monitor_interval_min || 30;
@@ -429,6 +586,11 @@
       model: $('model').value,
       effort: $('effort').value,
       apps: apps,
+      company: {
+        name: $('co-name').value, inn: $('co-inn').value, kpp: $('co-kpp').value, ogrn: $('co-ogrn').value,
+        address: $('co-address').value, director: $('co-director').value,
+        director_position: $('co-director-position').value, phone: $('co-phone').value, email: $('co-email').value,
+      },
       procurement: {
         pages_per_tag: Math.max(1, Math.min(10, Number($('pages').value) || 1)),
         monitor_interval_min: Math.max(10, Number($('interval').value) || 30),
@@ -474,7 +636,15 @@
           renderAnalytics(p.analytics);
           renderTable();
           if (p.errors && p.errors.length) setProcStatus(p.errors.join(' • '), true);
-          else setProcStatus('Обновлено: ' + new Date().toLocaleTimeString('ru-RU') + ', найдено ' + state.items.length);
+          else setProcStatus('Обновлено: ' + new Date().toLocaleTimeString('ru-RU') + ', актуальных: ' + state.items.length
+            + (p.notes && p.notes.length ? ' · ' + p.notes.join(' · ') : ''));
+          break;
+        case 'tender_state':
+          renderTender(p.state);
+          setTenderStatus(p.status, false, false);
+          break;
+        case 'tender_status':
+          setTenderStatus(p.text, !!p.busy, !!p.error);
           break;
         case 'monitor_new':
           toast(p.text);
@@ -493,5 +663,6 @@
     setMode('idle');
     pollStats();
     setInterval(pollStats, 3000);
+    renderTender(await api().tender_state());
   });
 })();

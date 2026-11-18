@@ -85,7 +85,8 @@
       <nav class="tabs" role="tablist">
         <button class="tab active" data-tab="chat" role="tab"><i>01</i>Диалог</button>
         <button class="tab" data-tab="proc" role="tab"><i>02</i>Закупки</button>
-        <button class="tab" data-tab="settings" role="tab"><i>03</i>Настройки</button>
+        <button class="tab" data-tab="tender" role="tab"><i>03</i>Заявка</button>
+        <button class="tab" data-tab="settings" role="tab"><i>04</i>Настройки</button>
       </nav>
 
       <!-- Диалог -->
@@ -150,7 +151,7 @@
             </div>
             <table class="table">
               <thead>
-                <tr><th>Номер / закон</th><th>Объект закупки</th><th>Заказчик</th><th>НМЦК</th><th>Подача до</th></tr>
+                <tr><th>Номер / закон</th><th>Объект закупки</th><th>Заказчик</th><th>НМЦК</th><th>Подача до</th><th></th></tr>
               </thead>
               <tbody id="proc-body"></tbody>
             </table>
@@ -167,6 +168,67 @@
             </div>
           </aside>
         </div>
+      </div>
+
+
+      <!-- Заявка -->
+      <div class="tab-body" id="tab-tender">
+        <div class="tender-grid">
+          <section class="tender-step" id="step-purchase">
+            <header class="step-head"><span class="step-num">01</span><h2>Закупка</h2></header>
+            <div id="tender-purchase" class="tender-purchase empty-state">Нажмите «В работу» у закупки на вкладке «Закупки» или введите номер.</div>
+            <div class="inline">
+              <input id="tender-number" type="text" placeholder="Номер закупки или ссылка на zakupki.gov.ru">
+              <button class="btn" id="tender-find" type="button">Найти</button>
+            </div>
+          </section>
+
+          <section class="tender-step" id="step-files">
+            <header class="step-head"><span class="step-num">02</span><h2>Документы ТЗ</h2></header>
+            <div class="step-actions">
+              <button class="btn btn-primary" id="tender-fetch" type="button">⇩ Скачать с ЕИС</button>
+              <button class="btn" id="tender-pick" type="button">📂 Выбрать файлы…</button>
+              <button class="btn btn-ghost" id="tender-clear" type="button">Очистить</button>
+            </div>
+            <ul id="tender-files" class="file-list"></ul>
+            <div id="tender-text-info" class="hint"></div>
+          </section>
+
+          <section class="tender-step wide" id="step-analysis">
+            <header class="step-head"><span class="step-num">03</span><h2>Разбор ТЗ</h2>
+              <button class="btn btn-primary" id="tender-analyze" type="button">◆ Разобрать ТЗ</button></header>
+            <div id="tender-facts" class="facts"></div>
+            <div id="tender-lists" class="tender-lists"></div>
+            <table class="table tender-table" id="tender-positions-table">
+              <thead><tr><th>№</th><th>Позиция</th><th>Кол-во</th><th>Требования заказчика</th></tr></thead>
+              <tbody id="tender-positions"></tbody>
+            </table>
+          </section>
+
+          <section class="tender-step wide" id="step-match">
+            <header class="step-head"><span class="step-num">04</span><h2>Подбор оборудования</h2>
+              <button class="btn btn-primary" id="tender-match" type="button">◆ Подобрать</button></header>
+            <div class="inline catalog-line">
+              <span id="tender-catalog" class="hint"></span>
+              <button class="btn btn-ghost" id="tender-catalog-import" type="button">Загрузить каталог (Excel)…</button>
+            </div>
+            <table class="table tender-table" id="tender-matches-table">
+              <thead><tr><th>Позиция</th><th>Предложение</th><th>Соответствие</th><th>Цена</th><th>Примечание</th></tr></thead>
+              <tbody id="tender-matches"></tbody>
+            </table>
+          </section>
+
+          <section class="tender-step wide" id="step-docs">
+            <header class="step-head"><span class="step-num">05</span><h2>Документы заявки</h2>
+              <button class="btn btn-primary" id="tender-build" type="button">▤ Сформировать</button></header>
+            <ul id="tender-docs" class="file-list"></ul>
+            <div class="inline">
+              <button class="btn btn-ghost" id="tender-open-folder" type="button">Открыть папку заявки</button>
+              <span class="hint">Это черновики: перед подачей сверьте характеристики с ТЗ и спецификацией производителя.</span>
+            </div>
+          </section>
+        </div>
+        <div id="tender-status" class="tender-status"></div>
       </div>
 
       <!-- Настройки -->
@@ -275,6 +337,26 @@
             <input id="interval" type="number" min="10" max="1440">
             <label for="ca-bundle">Сертификат Минцифры: файл или папка (по умолчанию %APPDATA%\Jarvis\certs)</label>
             <input id="ca-bundle" type="text" placeholder="C:\путь\к\russian_trusted_root_ca.cer">
+          </fieldset>
+          <fieldset>
+            <legend>Реквизиты компании (для документов)</legend>
+            <label for="co-name">Наименование</label>
+            <input id="co-name" type="text" placeholder="ООО «Ромашка»">
+            <div class="inline">
+              <input id="co-inn" type="text" placeholder="ИНН">
+              <input id="co-kpp" type="text" placeholder="КПП">
+              <input id="co-ogrn" type="text" placeholder="ОГРН">
+            </div>
+            <label for="co-address">Адрес</label>
+            <input id="co-address" type="text">
+            <div class="inline">
+              <input id="co-director-position" type="text" placeholder="Должность руководителя">
+              <input id="co-director" type="text" placeholder="Фамилия И.О.">
+            </div>
+            <div class="inline">
+              <input id="co-phone" type="text" placeholder="Телефон">
+              <input id="co-email" type="text" placeholder="E-mail">
+            </div>
           </fieldset>
           <div class="inline">
             <button class="btn btn-primary" type="submit">Сохранить настройки</button>
