@@ -37,7 +37,8 @@ def test_load_pem_rejects_garbage(tmp_path):
         certs.load_pem(bad)
 
 
-def test_bundle_from_certs_dir(pem_and_der):
+def test_bundle_from_certs_dir(pem_and_der, monkeypatch, tmp_path):
+    monkeypatch.setattr(certs, "BUNDLED_DIR", tmp_path / "none")
     _, der = pem_and_der
     shutil.copy(der, certs.certs_dir() / "russian_trusted_root_ca.cer")
     session = requests.Session()
@@ -50,7 +51,8 @@ def test_bundle_from_certs_dir(pem_and_der):
     ssl.create_default_context(cafile=verify)
 
 
-def test_setting_path_to_folder(pem_and_der, tmp_path):
+def test_setting_path_to_folder(pem_and_der, tmp_path, monkeypatch):
+    monkeypatch.setattr(certs, "BUNDLED_DIR", tmp_path / "none")
     pem, _ = pem_and_der
     folder = tmp_path / "mycerts"
     folder.mkdir()
@@ -58,7 +60,16 @@ def test_setting_path_to_folder(pem_and_der, tmp_path):
     assert [p.name for p in certs.find_custom_certs(str(folder))] == ["sub.crt"]
 
 
-def test_without_certs_uses_windows_store_adapter():
+def test_bundled_mintsifry_certs_are_used(monkeypatch):
+    names = [p.name for p in certs.find_custom_certs("")]
+    assert "russian_trusted_root_ca.cer" in names and "russian_trusted_sub_ca.cer" in names
+    verify = certs.configure_session(requests.Session(), "")
+    subjects = str([c["subject"] for c in ssl.create_default_context(cafile=verify).get_ca_certs()])
+    assert "Russian Trusted Root CA" in subjects and "Russian Trusted Sub CA" in subjects
+
+
+def test_without_certs_uses_windows_store_adapter(monkeypatch, tmp_path):
+    monkeypatch.setattr(certs, "BUNDLED_DIR", tmp_path / "none")
     session = requests.Session()
     assert certs.configure_session(session, "") is True
     assert isinstance(session.get_adapter("https://zakupki.gov.ru"), certs._TruststoreAdapter)

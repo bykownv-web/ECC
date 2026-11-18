@@ -3,6 +3,7 @@
 zakupki.gov.ru использует сертификат Минцифры («Russian Trusted Root CA»), которого нет
 в стандартном наборе Python. Два способа доверять ему, только для запросов Джарвиса к ЕИС:
 
+0. Официальные сертификаты Минцифры (с gosuslugi.ru/crt) уже лежат в assets/certs и подключаются сами.
 1. Положить файлы сертификатов (.cer, .crt или .pem) в папку %APPDATA%\\Jarvis\\certs
    или указать путь к файлу или папке в настройках. Джарвис объединит их со стандартным
    набором certifi в отдельный файл и будет использовать его только для ЕИС.
@@ -31,10 +32,13 @@ def certs_dir() -> Path:
     return path
 
 
+BUNDLED_DIR = Path(__file__).resolve().parents[1] / "assets" / "certs"
+
+
 def find_custom_certs(extra: str = "") -> list[Path]:
-    """Файлы сертификатов из папки certs и из пути, указанного в настройках."""
+    """Сертификаты Минцифры, вложенные в приложение, папка certs пользователя и путь из настроек."""
     found: list[Path] = []
-    candidates: list[Path] = [certs_dir()]
+    candidates: list[Path] = [BUNDLED_DIR, certs_dir()]
     if extra and extra.strip():
         candidates.append(Path(extra.strip().strip('"')))
     for item in candidates:
