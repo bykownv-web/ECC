@@ -267,6 +267,9 @@
     $('wake-word').value = cfg.wake_word || '';
     $('city').value = cfg.city || '';
     $('voice-enabled').checked = !!cfg.voice_enabled;
+    $('tts-voice').value = cfg.tts_voice || 'ru-RU-DmitryNeural';
+    $('tts-pitch').value = cfg.tts_pitch || '-8Hz';
+    $('tts-rate').value = cfg.tts_rate || '+0%';
     $('model').value = cfg.model || 'claude-opus-5-5';
     $('effort').value = cfg.effort || 'low';
     $('apps').value = Object.entries(cfg.apps || {}).map(([k, v]) => k + ' = ' + v).join('\n');
@@ -306,6 +309,18 @@
     }
   });
 
+  $('test-voice').addEventListener('click', async () => {
+    if (!api()) return;
+    await api().save_settings({
+      voice_enabled: true,
+      tts_voice: $('tts-voice').value,
+      tts_pitch: $('tts-pitch').value,
+      tts_rate: $('tts-rate').value,
+    });
+    $('voice-enabled').checked = true;
+    api().test_voice();
+  });
+
   $('settings-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     if (!api()) return;
@@ -324,6 +339,9 @@
       wake_word: $('wake-word').value.trim().toLowerCase() || 'джарвис',
       city: $('city').value.trim() || 'Москва',
       voice_enabled: $('voice-enabled').checked,
+      tts_voice: $('tts-voice').value,
+      tts_pitch: $('tts-pitch').value,
+      tts_rate: $('tts-rate').value,
       model: $('model').value,
       effort: $('effort').value,
       apps: apps,

@@ -33,7 +33,10 @@ TOOL_LABELS = {
     "system_info": "проверяю систему",
 }
 
-SETTINGS_KEYS = {"assistant_name", "user_name", "model", "effort", "voice_enabled", "wake_word", "city", "apps"}
+SETTINGS_KEYS = {
+    "assistant_name", "user_name", "model", "effort", "voice_enabled", "wake_word", "city", "apps",
+    "tts_voice", "tts_rate", "tts_pitch",
+}
 PROCUREMENT_KEYS = {"tags", "fz44", "fz223", "only_active", "price_from", "price_to", "pages_per_tag",
                     "monitor_interval_min", "ca_bundle"}
 
@@ -53,7 +56,7 @@ class JarvisApi:
         self._toolbox = ToolBox(config, self._emit)
         self._brain = Brain(config, self._toolbox, on_tool=self._on_tool)
         self._speaker = Speaker()
-        self._speaker.enabled = bool(config.get("voice_enabled", True))
+        self._apply_voice_settings()
         self._busy = threading.Event()
         self._monitor_stop: threading.Event | None = None
         try:
@@ -125,8 +128,21 @@ class JarvisApi:
             # Список программ заменяется целиком, чтобы удалённые пункты не возвращались.
             self._config.set("apps", clean.pop("apps"))
         self._config.update(clean)
-        self._speaker.enabled = bool(self._config.get("voice_enabled", True))
+        self._apply_voice_settings()
         return self.get_state()
+
+    def _apply_voice_settings(self) -> None:
+        self._speaker.enabled = bool(self._config.get("voice_enabled", True))
+        self._speaker.configure(
+            str(self._config.get("tts_voice", "ru-RU-DmitryNeural")),
+            str(self._config.get("tts_rate", "+0%")),
+            str(self._config.get("tts_pitch", "-8Hz")),
+        )
+
+    def test_voice(self) -> None:
+        name = self._config.get("assistant_name", "Джарвис")
+        user = self._config.get("user_name", "сэр")
+        self._speaker.say(f"Добрый день, {user}. Я {name}. Все системы работают в штатном режиме.")
 
     def save_api_key(self, key: str) -> dict[str, Any]:
         key = (key or "").strip()

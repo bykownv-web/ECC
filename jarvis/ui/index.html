@@ -159,6 +159,25 @@
             <label for="city">Город для погоды</label>
             <input id="city" type="text">
             <label class="check"><input type="checkbox" id="voice-enabled"> Озвучивать ответы</label>
+            <label for="tts-voice">Голос</label>
+            <select id="tts-voice">
+              <option value="ru-RU-DmitryNeural">Дмитрий — мужской, нейросетевой</option>
+              <option value="ru-RU-SvetlanaNeural">Светлана — женский, нейросетевой</option>
+              <option value="sapi">Системный голос Windows (без интернета)</option>
+            </select>
+            <div class="inline">
+              <select id="tts-pitch" title="Тон">
+                <option value="+0Hz">Тон обычный</option>
+                <option value="-8Hz">Тон ниже</option>
+                <option value="-15Hz">Тон ещё ниже</option>
+              </select>
+              <select id="tts-rate" title="Скорость">
+                <option value="-10%">Медленнее</option>
+                <option value="+0%">Обычная скорость</option>
+                <option value="+10%">Быстрее</option>
+              </select>
+              <button class="btn" type="button" id="test-voice">▶ Проверить</button>
+            </div>
           </fieldset>
           <fieldset>
             <legend>Программы</legend>

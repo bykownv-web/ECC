@@ -23,6 +23,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "model": "claude-opus-5-5",
     "effort": "low",
     "voice_enabled": True,
+    "tts_voice": "ru-RU-DmitryNeural",
+    "tts_rate": "+0%",
+    "tts_pitch": "-8Hz",
     "wake_word": "джарвис",
     "city": "Москва",
     "procurement": {

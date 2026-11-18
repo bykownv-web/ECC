@@ -1,64 +1,147 @@
-"""Голос: распознавание речи (SpeechRecognition + Google, русский) и озвучка (Windows SAPI).
+"""Голос: распознавание речи (SpeechRecognition + Google, русский) и озвучка.
 
-Озвучка идёт через встроенный в Windows System.Speech в отдельном процессе PowerShell:
-никаких дополнительных библиотек, и речь можно прервать в любой момент.
-Текст передаётся через переменную окружения, а не через командную строку.
+Озвучка по умолчанию — нейросетевой голос Microsoft (edge-tts, нужен интернет), мужской
+«Дмитрий» с чуть пониженным тоном. Звук проигрывается встроенным в Windows MCI, без
+дополнительных библиотек. Если нейросетевой голос недоступен, используется системный
+голос Windows (System.Speech) в отдельном процессе PowerShell; текст передаётся через
+переменную окружения, а не через командную строку.
 """
 
 from __future__ import annotations
 
+import asyncio
+import ctypes
 import os
 import platform
+import re
 import subprocess
+import tempfile
 import threading
+import uuid
+from pathlib import Path
 from typing import Callable
 
 IS_WINDOWS = platform.system() == "Windows"
 CREATE_NO_WINDOW = 0x08000000
 
+VOICES = {
+    "ru-RU-DmitryNeural": "Дмитрий — мужской, нейросетевой",
+    "ru-RU-SvetlanaNeural": "Светлана — женский, нейросетевой",
+    "sapi": "Системный голос Windows (без интернета)",
+}
+
 _TTS_SCRIPT = r"""
 Add-Type -AssemblyName System.Speech
 $s = New-Object System.Speech.Synthesis.SpeechSynthesizer
-try { $s.SelectVoiceByHints([System.Speech.Synthesis.VoiceGender]::Male, [System.Speech.Synthesis.VoiceAge]::Adult, 0, [System.Globalization.CultureInfo]'ru-RU') } catch {}
 $ru = $s.GetInstalledVoices() | Where-Object { $_.VoiceInfo.Culture.Name -eq 'ru-RU' } | Select-Object -First 1
-if ($ru -and $s.Voice.Culture.Name -ne 'ru-RU') { $s.SelectVoice($ru.VoiceInfo.Name) }
+if ($ru) { $s.SelectVoice($ru.VoiceInfo.Name) }
 $s.Rate = 1
 $s.Speak($env:JARVIS_TTS_TEXT)
 """
 
 
+def _mci(command: str, check: bool = False) -> str:
+    buf = ctypes.create_unicode_buffer(256)
+    code = ctypes.windll.winmm.mciSendStringW(command, buf, 255, 0)  # type: ignore[attr-defined]
+    if check and code != 0:
+        raise RuntimeError(f"MCI error {code} on: {command.split()[0]}")
+    return buf.value
+
+
 class Speaker:
     def __init__(self) -> None:
+        self.enabled = True
+        self.voice = "ru-RU-DmitryNeural"
+        self.rate = "+0%"
+        self.pitch = "-8Hz"
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
         self._proc: subprocess.Popen[bytes] | None = None
         self._lock = threading.Lock()
-        self.enabled = True
+
+    def configure(self, voice: str, rate: str, pitch: str) -> None:
+        self.voice = voice if voice in VOICES else "ru-RU-DmitryNeural"
+        self.rate = rate if re.fullmatch(r"[+-]\d{1,3}%", rate or "") else "+0%"
+        self.pitch = pitch if re.fullmatch(r"[+-]\d{1,3}Hz", pitch or "") else "-8Hz"
 
     def say(self, text: str) -> None:
-        if not (self.enabled and IS_WINDOWS and text.strip()):
+        text = (text or "").strip()
+        if not (self.enabled and IS_WINDOWS and text):
             return
         self.stop()
-        env = dict(os.environ, JARVIS_TTS_TEXT=text[:3000])
+        stop = threading.Event()
         with self._lock:
+            self._stop = stop
+            self._thread = threading.Thread(target=self._speak, args=(text[:3000], stop), daemon=True)
+            self._thread.start()
+
+    def _speak(self, text: str, stop: threading.Event) -> None:
+        if self.voice != "sapi":
             try:
-                self._proc = subprocess.Popen(
-                    ["powershell", "-NoProfile", "-NonInteractive", "-Command", _TTS_SCRIPT],
-                    env=env,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    creationflags=CREATE_NO_WINDOW,
-                )
+                self._speak_neural(text, stop)
+                return
+            except Exception:
+                if stop.is_set():
+                    return  # прервали — не переключаемся на запасной голос
+        self._speak_sapi(text, stop)
+
+    def _speak_neural(self, text: str, stop: threading.Event) -> None:
+        import edge_tts
+
+        path = Path(tempfile.gettempdir()) / f"jarvis_tts_{uuid.uuid4().hex}.mp3"
+        try:
+            asyncio.run(edge_tts.Communicate(text, self.voice, rate=self.rate, pitch=self.pitch).save(str(path)))
+            if stop.is_set():
+                return
+            alias = f"jarvis{uuid.uuid4().hex[:8]}"
+            _mci(f'open "{path}" type mpegvideo alias {alias}', check=True)
+            try:
+                _mci(f"play {alias}", check=True)
+                while not stop.wait(0.1):
+                    if _mci(f"status {alias} mode") != "playing":
+                        break
+            finally:
+                _mci(f"stop {alias}")
+                _mci(f"close {alias}")
+        finally:
+            try:
+                path.unlink(missing_ok=True)
             except OSError:
-                self._proc = None
+                pass
+
+    def _speak_sapi(self, text: str, stop: threading.Event) -> None:
+        env = dict(os.environ, JARVIS_TTS_TEXT=text)
+        try:
+            proc = subprocess.Popen(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", _TTS_SCRIPT],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=CREATE_NO_WINDOW,
+            )
+        except OSError:
+            return
+        with self._lock:
+            self._proc = proc
+        while proc.poll() is None:
+            if stop.wait(0.1):
+                proc.kill()
+                break
 
     def stop(self) -> None:
         with self._lock:
-            if self._proc is not None and self._proc.poll() is None:
-                self._proc.kill()
+            self._stop.set()
+            thread = self._thread
+            proc = self._proc
             self._proc = None
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=1.5)
 
     def is_speaking(self) -> bool:
         with self._lock:
-            return self._proc is not None and self._proc.poll() is None
+            return self._thread is not None and self._thread.is_alive()
 
 
 class VoiceError(Exception):
