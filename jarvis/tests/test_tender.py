@@ -40,8 +40,13 @@ def test_extract_docx_xlsx_txt_rtf(tmp_path):
     (tmp_path / "b.rtf").write_text(r"{\rtf1\ansi {\b \'cf\'f0\'ee\'e5\'ea\'f2\'ee\'f0}\par}", encoding="ascii")
     assert "Проектор" in tender_docs.extract_text(tmp_path / "b.rtf")
 
+    # .doc без Word: текст достаётся из бинарника (UTF-16)
+    body = "Требования к содержанию заявки: декларация о стране происхождения товара".encode("utf-16-le")
+    (tmp_path / "old.doc").write_bytes(b"\xd0\xcf\x11\xe0" + b"\x00" * 64 + body + b"\x00" * 32)
+    assert "декларация о стране происхождения" in tender_docs.extract_text(tmp_path / "old.doc")
+    (tmp_path / "bad.doc").write_bytes(b"\x00\x01\x02" * 50)
     with pytest.raises(ValueError, match="docx"):
-        tender_docs.extract_text(tmp_path / "old.doc")
+        tender_docs.extract_text(tmp_path / "bad.doc")
 
 
 def test_zip_is_unpacked_safely_and_processed(tmp_path):
@@ -62,6 +67,7 @@ def test_eis_urls_and_links():
     html = """<a href="https://zakupki.gov.ru/44fz/filestore/public/1.0/download/priz/file.html?uid=AB12" title="ТЗ.docx">ТЗ</a>
               <a href="/epz/order/notice/ea20/view/supplier-results.html">не файл</a>
               <a href="https://evil.example/download?uid=1">чужой</a>"""
+    html += """<a href="https://zakupki.gov.ru/epz/order/notice/signview/ep/listModal.html?reestrNumber=1&uid=AB12">подпись</a>"""
     links = tender_docs.parse_document_links(html, url)
     assert links == [("ТЗ.docx", "https://zakupki.gov.ru/44fz/filestore/public/1.0/download/priz/file.html?uid=AB12")]
     assert tender_docs.purchase_url_from_input("http://zakupki.gov.ru/x?regNumber=1").startswith("https://")

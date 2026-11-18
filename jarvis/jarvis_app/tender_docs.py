@@ -12,7 +12,7 @@ from bs4 import BeautifulSoup
 
 from .procurement import BASE_URL, ProcurementClient, ProcurementError
 
-SUPPORTED = {".docx", ".pdf", ".xlsx", ".xlsm", ".txt", ".csv", ".rtf", ".zip"}
+SUPPORTED = {".docx", ".doc", ".pdf", ".xlsx", ".xls", ".xlsm", ".txt", ".csv", ".rtf", ".zip"}
 MAX_FILE_BYTES = 40 * 1024 * 1024
 MAX_FILES = 20
 MAX_TEXT_CHARS = 400_000
@@ -151,6 +151,51 @@ def _plain_text(path: Path) -> str:
     return data.decode("utf-8", errors="ignore")
 
 
+_OFFICE_PS = r"""
+$ErrorActionPreference = 'Stop'
+$src = $env:JARVIS_SRC; $dst = $env:JARVIS_DST
+if ($src.ToLower().EndsWith('.doc')) {
+  $app = New-Object -ComObject Word.Application; $app.Visible = $false; $app.DisplayAlerts = 0
+  try { $d = $app.Documents.Open($src, $false, $true); $d.SaveAs2($dst, 16); $d.Close($false) } finally { $app.Quit() }
+} else {
+  $app = New-Object -ComObject Excel.Application; $app.Visible = $false; $app.DisplayAlerts = $false
+  try { $w = $app.Workbooks.Open($src, 0, $true); $w.SaveAs($dst, 51); $w.Close($false) } finally { $app.Quit() }
+}
+"""
+
+
+def convert_with_office(path: Path) -> Path | None:
+    """.doc → .docx и .xls → .xlsx через установленный Microsoft Office (Windows). None — если не вышло."""
+    import os
+    import platform
+    import subprocess
+
+    if platform.system() != "Windows":
+        return None
+    target = path.with_suffix(".docx" if path.suffix.lower() == ".doc" else ".xlsx")
+    if target.exists():
+        return target
+    env = dict(os.environ, JARVIS_SRC=str(path.resolve()), JARVIS_DST=str(target.resolve()))
+    try:
+        subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", _OFFICE_PS], env=env,
+                       capture_output=True, timeout=120, creationflags=0x08000000)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return target if target.exists() else None
+
+
+def _legacy_doc_text(path: Path) -> str:
+    """Запасной способ для .doc без Word: вытаскиваем текст из бинарника (UTF-16 и cp1251)."""
+    data = path.read_bytes()
+    runs = re.findall(rb"(?:[\x20-\x7e\x0d\x0a]\x00|[\x10-\x4f]\x04){6,}", data)
+    text = "\n".join(r.decode("utf-16-le", errors="ignore") for r in runs)
+    if len(re.findall(r"[А-Яа-я]", text)) < 50:
+        runs = re.findall(rb"[\xc0-\xff\x20-\x7e\xa8\xb8\x0d\x0a]{12,}", data)
+        text = "\n".join(r.decode("cp1251", errors="ignore") for r in runs)
+    lines = [ln.strip() for ln in text.replace("\r", "\n").split("\n") if len(re.findall(r"[А-Яа-яA-Za-z]", ln)) >= 4]
+    return "\n".join(lines)
+
+
 def extract_text(path: Path) -> str:
     suffix = path.suffix.lower()
     if suffix == ".docx":
@@ -163,9 +208,15 @@ def extract_text(path: Path) -> str:
         return _rtf_text(path)
     if suffix in (".txt", ".csv"):
         return _plain_text(path)
-    if suffix == ".doc":
-        raise ValueError("старый формат .doc: откройте файл в Word и сохраните как .docx")
-    if suffix == ".xls":
+    if suffix in (".doc", ".xls"):
+        converted = convert_with_office(path)
+        if converted is not None:
+            return extract_text(converted)
+        if suffix == ".doc":
+            text = _legacy_doc_text(path)
+            if text:
+                return text
+            raise ValueError("старый формат .doc: откройте файл в Word и сохраните как .docx")
         raise ValueError("старый формат .xls: откройте в Excel и сохраните как .xlsx")
     raise ValueError(f"формат {suffix or 'без расширения'} не поддерживается")
 
@@ -240,7 +291,10 @@ def parse_document_links(html: str, page_url: str) -> list[tuple[str, str]]:
     seen: set[str] = set()
     for link in soup.find_all("a", href=True):
         href = link["href"]
-        if not re.search(r"(filestore|download|/file\.html|uid=)", href, re.I):
+        # Ссылки на просмотр электронной подписи (signview/listModal) — не файлы.
+        if re.search(r"(signview|listModal|/sign/|printForm)", href, re.I):
+            continue
+        if not re.search(r"(filestore|/download|/file\.html)", href, re.I):
             continue
         url = urljoin(page_url, href)
         host = urlparse(url).netloc
