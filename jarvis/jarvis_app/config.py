@@ -38,6 +38,18 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "name": "", "inn": "", "kpp": "", "ogrn": "", "address": "",
         "director": "", "director_position": "Генеральный директор", "phone": "", "email": "",
     },
+    "telegram": {"enabled": False, "chat_id": None, "bot_name": "", "notify": True},
+    "email": {"enabled": False, "preset": "yandex", "host": "smtp.yandex.ru", "port": 465, "login": "", "to": "", "notify": True},
+    "analyst": {
+        "enabled": False,
+        "profile": (
+            "Поставка, монтаж и пусконаладка проекторов, интерактивного и мультимедийного оборудования, "
+            "звукового, светового и сценического (театрального) оборудования для школ, вузов, домов культуры и театров."
+        ),
+        "min_score": 60,
+        "top_n": 3,
+    },
+    "shortcut_created": False,
     "procurement": {
         "tags": [
             "проектор",

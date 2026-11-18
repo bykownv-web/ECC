@@ -31,6 +31,7 @@ def main() -> None:
     )
     api._attach(window)  # noqa: SLF001
     window.events.closed += api.shutdown
+    window.events.loaded += api.ensure_shortcut
     webview.start()
 
 

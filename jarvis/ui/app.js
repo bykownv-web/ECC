@@ -445,6 +445,167 @@
     if (res && res.ok === false) toast(res.text);
   });
 
+
+  // ---------- аналитика ----------
+  function rub(v) {
+    return v === null || v === undefined ? '—' : money(v);
+  }
+
+  function renderAnalyst(st) {
+    if (!st) return;
+    const set = st.settings || {};
+    if (document.activeElement !== $('an-profile')) $('an-profile').value = set.profile || '';
+    $('an-enabled').checked = !!set.enabled;
+    $('an-min').value = set.min_score || 60;
+    $('an-top').value = set.top_n || 3;
+
+    const scores = $('an-scores');
+    scores.textContent = '';
+    (st.scores || []).forEach((sc) => {
+      const cls = sc.score >= 80 ? 'badge ok' : sc.score >= 60 ? 'badge warn' : 'badge';
+      const li = el('li', { title: sc.reason || '' }, [
+        el('span', { cls: cls, text: String(sc.score) }),
+        el('div', { cls: 'clamp clamp-2', text: sc.title || sc.number }),
+        el('div', { cls: 'small', text: sc.reason || '' }),
+      ]);
+      li.addEventListener('click', () => api() && api().open_link(sc.url));
+      li.classList.add('row-link');
+      scores.appendChild(li);
+    });
+
+    const box = $('an-reports');
+    box.textContent = '';
+    const reports = st.reports || [];
+    if (!reports.length) {
+      box.appendChild(el('div', { cls: 'empty', text: 'Отчётов пока нет. Заполните профиль и нажмите «Проанализировать сейчас».' }));
+      return;
+    }
+    reports.forEach((r) => {
+      const p = r.purchase || {};
+      const e = r.estimate || {};
+      const t = r.totals || {};
+      const rec = e.recommendation || '';
+      const recCls = { 'участвовать': 'badge ok', 'подумать': 'badge warn', 'не участвовать': 'badge bad' }[rec] || 'badge';
+      const link = el('a', { text: '№ ' + p.number, title: 'Открыть на zakupki.gov.ru' });
+      link.addEventListener('click', () => api() && api().open_link(p.url));
+      const toTender = el('button', { cls: 'btn btn-small', text: 'В работу' });
+      toTender.type = 'button';
+      toTender.addEventListener('click', async () => {
+        const res = await api().analyst_to_tender(p.number);
+        if (res && res.ok === false) toast(res.text);
+        else switchTab('tender');
+      });
+      const card = el('article', { cls: 'tender-step an-card' }, [
+        el('header', { cls: 'an-card-head' }, [
+          el('span', { cls: 'an-score', text: String(r.score ?? '—') }),
+          el('div', { cls: 'an-title' }, [el('div', { cls: 'clamp clamp-2', text: p.title || '', title: p.title || '' }),
+            el('div', { cls: 'small' }, [link, document.createTextNode(' · ' + (p.law || '') + ' · ' + (p.customer || '').slice(0, 90))])]),
+          rec ? el('span', { cls: recCls, text: rec }) : null,
+          toTender,
+        ]),
+        el('div', { cls: 'facts an-facts' }, [
+          kv('НМЦК', rub(p.price)), kv('Подача до', p.deadline),
+          kv('Оборудование', t.equipment_min !== undefined ? rub(t.equipment_min) + ' – ' + rub(t.equipment_max) : '—'),
+          kv('Монтаж', e.installation_required ? rub(t.installation_min) + ' – ' + rub(t.installation_max) : (e.equipment ? 'не требуется' : '—')),
+          kv('Себестоимость', t.cost_min !== undefined ? rub(t.cost_min) + ' – ' + rub(t.cost_max) : '—'),
+          kv('Маржа', t.margin_min !== null && t.margin_min !== undefined
+            ? rub(t.margin_min) + ' – ' + rub(t.margin_max) + ' (' + t.margin_pct_min + '…' + t.margin_pct_max + '%)' : '—'),
+        ]),
+      ]);
+      if (r.score_reason) card.appendChild(el('div', { cls: 'small', text: 'Почему подходит: ' + r.score_reason }));
+      if (r.error) card.appendChild(el('div', { cls: 'proc-status error', text: 'Глубокий разбор не удался: ' + r.error }));
+      if (e.equipment && e.equipment.length) {
+        const body = el('tbody');
+        e.equipment.forEach((it) => body.appendChild(el('tr', null, [
+          el('td', null, [document.createTextNode(it.name || ''), el('div', { cls: 'small', text: it.key_specs || '' })]),
+          el('td', { text: ((it.quantity || '') + ' ' + (it.unit || '')).trim() }),
+          el('td', { cls: 'num', text: rub(it.total_min) + ' – ' + rub(it.total_max) }),
+          el('td', { cls: 'small', text: it.price_basis || '' }),
+        ])));
+        card.appendChild(el('table', { cls: 'table tender-table an-table' }, [
+          el('thead', null, [el('tr', null, [el('th', { text: 'Оборудование' }), el('th', { text: 'Кол-во' }), el('th', { text: 'Стоимость' }), el('th', { text: 'Основа цены' })])]),
+          body,
+        ]));
+      }
+      if (e.installation_required && e.installation_scope) card.appendChild(kv('Работы по монтажу', e.installation_scope));
+      if (e.other_costs) card.appendChild(kv('Прочие расходы', e.other_costs));
+      if (e.risks && e.risks.length) {
+        const ul = el('ul', { cls: 'req-list' });
+        e.risks.forEach((x) => ul.appendChild(el('li', { text: x })));
+        card.appendChild(el('div', { cls: 'tender-list' }, [el('h3', { text: 'Риски' }), ul]));
+      }
+      if (e.reasoning) card.appendChild(el('div', { cls: 'an-reasoning', text: e.reasoning }));
+      card.appendChild(el('div', { cls: 'small', text: 'Цены ориентировочные: ' + (e.equipment && e.equipment.some((x) => x.price_basis === 'каталог') ? 'частично из вашего каталога.' : 'оценка ИИ, проверьте у поставщиков.') }));
+      box.appendChild(card);
+    });
+  }
+
+  function analystValues() {
+    return {
+      enabled: $('an-enabled').checked,
+      profile: $('an-profile').value.trim(),
+      min_score: Number($('an-min').value) || 60,
+      top_n: Number($('an-top').value) || 3,
+    };
+  }
+  $('an-save').addEventListener('click', async () => {
+    if (!api()) return;
+    const res = await api().analyst_save(analystValues());
+    toast(res.text);
+    renderAnalyst(await api().analyst_state());
+  });
+  $('an-run').addEventListener('click', async () => {
+    if (!api()) return;
+    await api().analyst_save(analystValues());
+    api().analyst_run_now();
+  });
+
+  // ---------- Telegram и почта ----------
+  function renderIntegrations(st) {
+    const tg = st.telegram || {};
+    $('tg-status').textContent = !tg.enabled ? 'Не подключён.'
+      : tg.paired ? 'Подключён' + (tg.bot ? ' (@' + tg.bot + ')' : '') + ', чат привязан. Бот отвечает только вам.'
+        : 'Бот подключён' + (tg.bot ? ' (@' + tg.bot + ')' : '') + ', ждёт привязки чата.';
+    if (tg.code && !tg.paired) $('tg-code').textContent = 'Отправьте боту: /start ' + tg.code;
+    else $('tg-code').textContent = '';
+    const em = st.email || {};
+    $('em-status').textContent = em.configured ? 'Почта настроена.' : (em.has_password ? 'Пароль сохранён.' : 'Пароль не задан.');
+  }
+
+  $('tg-connect').addEventListener('click', async () => {
+    if (!api()) return;
+    const res = await api().telegram_connect($('tg-token').value.trim());
+    toast(res.text);
+    if (res.ok) {
+      $('tg-token').value = '';
+      $('tg-code').textContent = res.text;
+    }
+    renderIntegrations(await api().get_state());
+  });
+  $('tg-test').addEventListener('click', async () => toast((await api().telegram_test()).text));
+  $('tg-disconnect').addEventListener('click', async () => {
+    toast((await api().telegram_disconnect()).text);
+    renderIntegrations(await api().get_state());
+  });
+
+  function updateEmailUi() {
+    $('em-custom').style.display = $('em-preset').value === 'custom' ? 'flex' : 'none';
+  }
+  $('em-preset').addEventListener('change', updateEmailUi);
+  $('em-save').addEventListener('click', async () => {
+    if (!api()) return;
+    const res = await api().email_save({
+      enabled: $('em-enabled').checked, preset: $('em-preset').value, host: $('em-host').value.trim(),
+      port: Number($('em-port').value) || 465, login: $('em-login').value.trim(), to: $('em-to').value.trim(),
+      password: $('em-password').value,
+    });
+    toast(res.text);
+    if (res.ok) $('em-password').value = '';
+    renderIntegrations(await api().get_state());
+  });
+  $('em-test').addEventListener('click', () => api() && api().email_test());
+  $('make-shortcut').addEventListener('click', async () => toast((await api().create_shortcut()).text));
+
   // ---------- настройки ----------
   function fillSettings(cfg) {
     $('assistant-name').value = cfg.assistant_name || '';
@@ -466,6 +627,14 @@
     $('model').value = cfg.model || 'claude-opus-5-5';
     $('effort').value = cfg.effort || 'low';
     $('apps').value = Object.entries(cfg.apps || {}).map(([k, v]) => k + ' = ' + v).join('\n');
+    const em = cfg.email || {};
+    $('em-enabled').checked = !!em.enabled;
+    $('em-preset').value = em.preset || 'yandex';
+    $('em-host').value = em.host || '';
+    $('em-port').value = em.port || 465;
+    $('em-login').value = em.login || '';
+    $('em-to').value = em.to || '';
+    updateEmailUi();
     const co = cfg.company || {};
     [['co-name', 'name'], ['co-inn', 'inn'], ['co-kpp', 'kpp'], ['co-ogrn', 'ogrn'], ['co-address', 'address'],
       ['co-director', 'director'], ['co-director-position', 'director_position'], ['co-phone', 'phone'], ['co-email', 'email']]
@@ -539,6 +708,7 @@
     voice.className = 'pill ' + (st.voice_available ? 'ok' : 'off');
     voice.title = st.voice_error || '';
     $('eleven-status').textContent = st.has_eleven_key ? 'Ключ ElevenLabs сохранён.' : 'Ключ ElevenLabs не задан.';
+    renderIntegrations(st);
     $('key-status').textContent = st.has_key ? 'Ключ сохранён.' : 'Ключ не задан — работают только простые команды.';
   }
 
@@ -646,6 +816,24 @@
         case 'tender_status':
           setTenderStatus(p.text, !!p.busy, !!p.error);
           break;
+        case 'analyst_state':
+          renderAnalyst(p);
+          break;
+        case 'analyst_status': {
+          const s2 = $('an-status');
+          s2.textContent = p.text || '';
+          s2.classList.toggle('error', !!p.error);
+          s2.classList.toggle('busy', !!p.busy);
+          $('an-run').disabled = !!p.busy;
+          break;
+        }
+        case 'telegram_status':
+          if (p.text) toast(p.text);
+          if (p.paired && api()) api().get_state().then(renderIntegrations);
+          break;
+        case 'toast':
+          toast(p.text);
+          break;
         case 'monitor_new':
           toast(p.text);
           addMessage('assistant', '🔔 ' + p.text);
@@ -664,5 +852,6 @@
     pollStats();
     setInterval(pollStats, 3000);
     renderTender(await api().tender_state());
+    renderAnalyst(await api().analyst_state());
   });
 })();

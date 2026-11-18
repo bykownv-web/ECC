@@ -102,7 +102,8 @@
         <button class="tab active" data-tab="chat" role="tab"><i>01</i>Диалог</button>
         <button class="tab" data-tab="proc" role="tab"><i>02</i>Закупки</button>
         <button class="tab" data-tab="tender" role="tab"><i>03</i>Заявка</button>
-        <button class="tab" data-tab="settings" role="tab"><i>04</i>Настройки</button>
+        <button class="tab" data-tab="analyst" role="tab"><i>04</i>Аналитика</button>
+        <button class="tab" data-tab="settings" role="tab"><i>05</i>Настройки</button>
       </nav>
 
       <!-- Диалог -->
@@ -255,6 +256,34 @@
         <div id="tender-status" class="tender-status"></div>
       </div>
 
+      <!-- Аналитика -->
+      <div class="tab-body" id="tab-analyst">
+        <section class="tender-step wide analyst-setup">
+          <header class="step-head"><span class="step-num">AI</span><h2>Автоаналитика закупок</h2>
+            <button class="btn btn-primary" id="an-run" type="button">▶ Проанализировать сейчас</button></header>
+          <label for="an-profile" class="field-label">Профиль компании — что вы поставляете и монтируете (по нему Джарвис оценивает закупки)</label>
+          <textarea id="an-profile" rows="3"></textarea>
+          <div class="inline an-options">
+            <label class="check"><input type="checkbox" id="an-enabled"> Анализировать автоматически при мониторинге</label>
+            <label class="field-label" for="an-min">Порог, баллов</label>
+            <input id="an-min" type="number" min="0" max="100">
+            <label class="field-label" for="an-top">Подробно разбирать, шт. за раз</label>
+            <input id="an-top" type="number" min="1" max="10">
+            <button class="btn" id="an-save" type="button">Сохранить</button>
+          </div>
+          <div id="an-status" class="tender-status"></div>
+        </section>
+        <div class="analyst-split">
+          <div id="an-reports" class="an-reports"></div>
+          <aside class="side an-scores-box">
+            <div>
+              <h3>Оценка соответствия</h3>
+              <ol id="an-scores" class="list an-scores"></ol>
+            </div>
+          </aside>
+        </div>
+      </div>
+
       <!-- Настройки -->
       <div class="tab-body" id="tab-settings">
         <form id="settings-form" class="settings">
@@ -381,6 +410,51 @@
               <input id="co-phone" type="text" placeholder="Телефон">
               <input id="co-email" type="text" placeholder="E-mail">
             </div>
+          </fieldset>
+          <fieldset>
+            <legend>Telegram</legend>
+            <div id="tg-status" class="hint">Не подключён.</div>
+            <label for="tg-token">Токен бота от @BotFather</label>
+            <div class="inline">
+              <input id="tg-token" type="password" autocomplete="off" placeholder="1234567890:AAH… (хранится в диспетчере учётных данных Windows)">
+              <button class="btn" type="button" id="tg-connect">Подключить</button>
+            </div>
+            <div id="tg-code" class="tg-code"></div>
+            <div class="inline">
+              <button class="btn btn-ghost" type="button" id="tg-test">Проверить связь</button>
+              <button class="btn btn-ghost" type="button" id="tg-disconnect">Отключить</button>
+            </div>
+          </fieldset>
+          <fieldset>
+            <legend>Почта (отчёты и уведомления)</legend>
+            <label class="check"><input type="checkbox" id="em-enabled"> Отправлять отчёты на почту</label>
+            <label for="em-preset">Почтовый сервис</label>
+            <select id="em-preset">
+              <option value="yandex">Яндекс Почта</option>
+              <option value="mailru">Mail.ru</option>
+              <option value="gmail">Gmail</option>
+              <option value="custom">Другой SMTP-сервер</option>
+            </select>
+            <div class="inline" id="em-custom">
+              <input id="em-host" type="text" placeholder="smtp.example.ru">
+              <input id="em-port" type="number" placeholder="465">
+            </div>
+            <label for="em-login">Ваш адрес (логин)</label>
+            <input id="em-login" type="text" placeholder="name@yandex.ru">
+            <label for="em-password">Пароль приложения (не обычный пароль от почты)</label>
+            <input id="em-password" type="password" autocomplete="off" placeholder="хранится в диспетчере учётных данных Windows">
+            <label for="em-to">Куда присылать отчёты</label>
+            <input id="em-to" type="text" placeholder="по умолчанию — на ваш же адрес">
+            <div class="inline">
+              <button class="btn" type="button" id="em-save">Сохранить почту</button>
+              <button class="btn btn-ghost" type="button" id="em-test">Тестовое письмо</button>
+            </div>
+            <div id="em-status" class="hint"></div>
+          </fieldset>
+          <fieldset>
+            <legend>Ярлык</legend>
+            <div class="hint">Значок J.A.R.V.I.S. на рабочем столе для быстрого запуска.</div>
+            <button class="btn" type="button" id="make-shortcut">Создать ярлык на рабочем столе</button>
           </fieldset>
           <div class="inline">
             <button class="btn btn-primary" type="submit">Сохранить настройки</button>

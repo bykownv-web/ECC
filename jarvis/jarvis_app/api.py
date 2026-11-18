@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import threading
 import traceback
 from pathlib import Path
@@ -10,6 +11,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from . import __version__
+from .analyst import Analyst, format_report
 from .brain import Brain
 from .config import (
     Config,
@@ -19,7 +21,18 @@ from .config import (
     set_api_key,
     set_elevenlabs_key,
 )
-from .procurement import ProcurementError
+from .notify import (
+    REMOTE_BLOCKED_TOOLS,
+    SMTP_KEY,
+    SMTP_PRESETS,
+    Mailer,
+    Notifier,
+    TelegramBot,
+    TelegramError,
+    get_secret,
+    set_secret,
+)
+from .procurement import ProcurementError, summary_text
 from .tender import TenderError, TenderWorkspace
 from .tools import ToolBox, ToolError
 from .voice import Listener, Speaker, VoiceError
@@ -61,6 +74,21 @@ def _log_error(exc: BaseException) -> None:
         pass
 
 
+class RemoteToolBox:
+    """Инструменты для команд из Telegram: то же, что в окне, кроме опасных действий."""
+
+    def __init__(self, toolbox: ToolBox) -> None:
+        self._toolbox = toolbox
+
+    def execute(self, name: str, args: dict[str, Any]) -> str:
+        if name in REMOTE_BLOCKED_TOOLS:
+            raise ToolError("Это действие нельзя выполнить из Telegram — только с компьютера.")
+        return self._toolbox.execute(name, args)
+
+    def __getattr__(self, item: str):
+        return getattr(self._toolbox, item)
+
+
 class JarvisApi:
     def __init__(self, config: Config) -> None:
         self._config = config
@@ -74,6 +102,14 @@ class JarvisApi:
         self._apply_voice_settings()
         self._busy = threading.Event()
         self._monitor_stop: threading.Event | None = None
+        self._remote_brain = Brain(config, RemoteToolBox(self._toolbox))  # Telegram — отдельная история диалога
+        self._telegram = TelegramBot(config, self._on_telegram_message, self._emit)
+        self._mailer = Mailer(config)
+        self._notifier = Notifier(self._telegram, self._mailer, config)
+        self._analyst = Analyst(config, self._toolbox.procurement_client, self._emit, notify=self._notify_external)
+        self._telegram.start()
+        if config.get("analyst", {}).get("enabled"):
+            self.set_monitoring(True)
         try:
             self._listener: Listener | None = Listener()
             self._voice_error = ""
@@ -116,6 +152,8 @@ class JarvisApi:
             "ai_ok": self._brain.has_ai(),
             "has_key": bool(get_api_key()),
             "has_eleven_key": bool(get_elevenlabs_key()),
+            "telegram": self._telegram.status(),
+            "email": self.email_status(),
             "voice_available": self._listener is not None,
             "voice_error": self._voice_error,
             "version": __version__,
@@ -438,7 +476,14 @@ class JarvisApi:
                         text = f"Появилось новых закупок: {len(new)}. {titles}"
                         self._emit("monitor_new", {"count": len(new), "text": text})
                         self._speaker.say(f"{self._config.get('user_name', 'сэр').capitalize()}, появилось новых закупок: {len(new)}.")
+                        if not self._config.get("analyst", {}).get("enabled"):
+                            self._notify_external("Новые закупки", summary_text(new, limit=10), email=False)
                     first = False
+                    if self._config.get("analyst", {}).get("enabled") and found:
+                        try:
+                            self._analyst.run(found)
+                        except ValueError as exc:
+                            self._emit("analyst_status", {"text": str(exc), "busy": False, "error": True})
                 except ProcurementError as exc:
                     self._emit("error", {"text": f"Мониторинг: {exc}"})
                 except Exception as exc:
@@ -448,7 +493,148 @@ class JarvisApi:
         threading.Thread(target=loop, daemon=True, name="jarvis-monitor").start()
         return {"ok": True, "text": f"Мониторинг включён: проверка каждые {interval} мин."}
 
+    # ---------- уведомления, Telegram, почта ----------
+    def _notify_external(self, title: str, text: str, email: bool = True) -> None:
+        try:
+            self._notifier.notify(title, text, email=email)
+        except Exception as exc:  # уведомление не должно ломать мониторинг
+            _log_error(exc)
+
+    def _on_telegram_message(self, text: str) -> str:
+        if text.startswith("/zakupki"):
+            try:
+                found, errors = self._toolbox.run_procurement_search()
+            except ProcurementError as exc:
+                return f"Поиск не удался: {exc}"
+            return summary_text(found, limit=10) + ("\n" + "; ".join(errors) if errors else "")
+        if text.startswith("/analytics"):
+            reports = self._analyst.store.reports[:3]
+            if not reports:
+                return "Отчётов аналитики пока нет. Включите автоаналитику на вкладке «Аналитика» в окне Джарвиса."
+            return "\n\n———\n\n".join(format_report(r) for r in reports)
+        self._emit("user", {"text": f"[Telegram] {text}"})
+        answer = self._remote_brain.ask(text)
+        self._emit("assistant", {"text": f"[Telegram] {answer}"})
+        return answer
+
+    def telegram_status(self) -> dict[str, Any]:
+        return self._telegram.status()
+
+    def telegram_connect(self, token: str) -> dict[str, Any]:
+        try:
+            info = self._telegram.connect(token)
+        except TelegramError as exc:
+            return {"ok": False, "text": str(exc)}
+        bot = f"@{info['bot']}" if info.get("bot") else "вашему боту"
+        return {"ok": True, "code": info["code"], "text": f"Отправьте {bot} сообщение: /start {info['code']}"}
+
+    def telegram_disconnect(self) -> dict[str, Any]:
+        self._telegram.disconnect()
+        return {"ok": True, "text": "Telegram отключён."}
+
+    def telegram_test(self) -> dict[str, Any]:
+        if not self._telegram.chat_id():
+            return {"ok": False, "text": "Сначала привяжите чат: /start и код."}
+        ok = self._telegram.send("Проверка связи. Джарвис на линии.")
+        return {"ok": ok, "text": "Сообщение отправлено." if ok else "Не удалось отправить."}
+
+    def email_save(self, values: dict[str, Any]) -> dict[str, Any]:
+        values = values or {}
+        preset = str(values.get("preset", "custom"))
+        host, port = SMTP_PRESETS.get(preset, (str(values.get("host", "")).strip(), values.get("port") or 465))
+        try:
+            port = int(port)
+        except (TypeError, ValueError):
+            port = 465
+        self._config.update({"email": {
+            "enabled": bool(values.get("enabled", True)), "preset": preset, "host": host, "port": port,
+            "login": str(values.get("login", "")).strip(), "to": str(values.get("to", "")).strip() or str(values.get("login", "")).strip(),
+            "notify": bool(values.get("notify", True)),
+        }})
+        password = str(values.get("password", ""))
+        if password and not set_secret(SMTP_KEY, password):
+            return {"ok": False, "text": "Не удалось сохранить пароль в диспетчере учётных данных Windows."}
+        return {"ok": True, "text": "Почта сохранена.", "has_password": bool(get_secret(SMTP_KEY))}
+
+    def email_test(self) -> None:
+        def work() -> None:
+            try:
+                self._mailer.send("J.A.R.V.I.S.: проверка почты", "Если вы читаете это письмо, отправка отчётов работает.")
+                self._emit("toast", {"text": "Тестовое письмо отправлено."})
+            except OSError as exc:
+                self._emit("error", {"text": str(exc)})
+
+        self._run_async(work)
+
+    def email_status(self) -> dict[str, Any]:
+        return {"has_password": bool(get_secret(SMTP_KEY)), "configured": self._mailer.configured()}
+
+    # ---------- аналитика ----------
+    def analyst_state(self) -> dict[str, Any]:
+        return self._analyst.snapshot()
+
+    def analyst_save(self, values: dict[str, Any]) -> dict[str, Any]:
+        values = values or {}
+        clean = {
+            "enabled": bool(values.get("enabled")),
+            "profile": str(values.get("profile", ""))[:3000],
+            "min_score": max(0, min(100, int(values.get("min_score") or 60))),
+            "top_n": max(1, min(10, int(values.get("top_n") or 3))),
+        }
+        self._config.update({"analyst": clean})
+        if clean["enabled"]:
+            self.set_monitoring(True)
+        return {"ok": True, "text": "Автоаналитика включена: Джарвис будет проверять закупки по расписанию мониторинга."
+                if clean["enabled"] else "Настройки аналитики сохранены."}
+
+    def analyst_run_now(self) -> None:
+        def work() -> None:
+            try:
+                self._emit("analyst_status", {"text": "Ищу закупки по вашим тегам…", "busy": True})
+                found, _ = self._toolbox.run_procurement_search()
+                self._analyst.run(found)
+            except (ProcurementError, ValueError) as exc:
+                self._emit("analyst_status", {"text": str(exc), "busy": False, "error": True})
+            except Exception as exc:
+                from .llm import LLMError
+
+                if not isinstance(exc, LLMError):
+                    _log_error(exc)
+                self._emit("analyst_status", {"text": str(exc) or exc.__class__.__name__, "busy": False, "error": True})
+
+        self._run_async(work)
+
+    def analyst_to_tender(self, number: str) -> dict[str, Any]:
+        for report in self._analyst.store.reports:
+            if report["purchase"].get("number") == number:
+                return self.tender_set_purchase(report["purchase"])
+        return {"ok": False, "text": "Отчёт не найден."}
+
+    # ---------- ярлык ----------
+    def create_shortcut(self) -> dict[str, Any]:
+        from .shortcut import create_desktop_shortcut
+
+        try:
+            path = create_desktop_shortcut()
+            self._config.update({"shortcut_created": True})
+            return {"ok": True, "text": f"Ярлык создан: {path}"}
+        except (OSError, subprocess.SubprocessError) as exc:
+            return {"ok": False, "text": f"Не удалось создать ярлык: {exc}"}
+
+    def ensure_shortcut(self) -> None:
+        """Один раз при первом запуске создаёт ярлык на рабочем столе."""
+        if self._config.get("shortcut_created"):
+            return
+
+        def work() -> None:
+            res = self.create_shortcut()
+            if res["ok"]:
+                self._emit("toast", {"text": "На рабочем столе создан ярлык J.A.R.V.I.S."})
+
+        self._run_async(work)
+
     def shutdown(self) -> None:
+        self._telegram.stop()
         if self._monitor_stop is not None:
             self._monitor_stop.set()
         if self._listener is not None:
