@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>J.A.R.V.I.S.</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">J.A.R.V.I.S.<span class="brand-sub">Just A Rather Very Intelligent System</span></div>
+    <div class="topbar-right">
+      <span id="ai-pill" class="pill">ИИ: —</span>
+      <span id="voice-pill" class="pill">Голос: —</span>
+      <span id="clock" class="clock">--:--</span>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="core">
+      <div id="reactor" class="reactor" data-mode="idle" aria-hidden="true">
+        <div class="ring r1"></div>
+        <div class="ring r2"></div>
+        <div class="ring r3"></div>
+        <div class="ring r4"></div>
+        <div class="reactor-core"></div>
+      </div>
+      <div id="state-label" class="state-label">Ожидание</div>
+      <div id="tool-label" class="tool-label"></div>
+
+      <div class="core-buttons">
+        <button id="mic-btn" class="btn btn-primary btn-round" title="Сказать команду">🎙 Говорить</button>
+        <button id="stop-btn" class="btn" title="Прервать речь">⏹ Тише</button>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="wake-toggle">
+        <span>Слушать фоном (скажите «Джарвис…»)</span>
+      </label>
+      <div class="hint">
+        Примеры: «Найди закупки проектор», «Какая погода?», «Открой калькулятор»,
+        «Напомни через 15 минут позвонить заказчику», «Проанализируй закупки».
+      </div>
+    </section>
+
+    <section class="panel">
+      <nav class="tabs" role="tablist">
+        <button class="tab active" data-tab="chat" role="tab">Диалог</button>
+        <button class="tab" data-tab="proc" role="tab">Закупки</button>
+        <button class="tab" data-tab="settings" role="tab">Настройки</button>
+      </nav>
+
+      <!-- Диалог -->
+      <div class="tab-body active" id="tab-chat">
+        <div id="messages" class="messages" aria-live="polite"></div>
+        <form id="chat-form" class="chat-form">
+          <input id="chat-input" type="text" autocomplete="off" placeholder="Напишите команду или вопрос…">
+          <button class="btn btn-primary" type="submit">Отправить</button>
+          <button class="btn" type="button" id="reset-btn" title="Начать новый диалог">Новый</button>
+        </form>
+      </div>
+
+      <!-- Закупки -->
+      <div class="tab-body" id="tab-proc">
+        <div class="proc-controls">
+          <div class="field grow">
+            <label for="tag-input">Ключевые слова (теги)</label>
+            <div id="tags" class="tags"></div>
+            <div class="inline">
+              <input id="tag-input" type="text" placeholder="Добавить тег и нажать Enter">
+              <button class="btn" id="tag-add" type="button">+</button>
+            </div>
+          </div>
+          <div class="field">
+            <label>Законы</label>
+            <label class="check"><input type="checkbox" id="fz44" checked> 44-ФЗ</label>
+            <label class="check"><input type="checkbox" id="fz223" checked> 223-ФЗ</label>
+            <label class="check"><input type="checkbox" id="only-active" checked> Только подача заявок</label>
+          </div>
+          <div class="field">
+            <label for="price-from">НМЦК, ₽</label>
+            <input id="price-from" type="number" min="0" placeholder="от">
+            <input id="price-to" type="number" min="0" placeholder="до">
+          </div>
+          <div class="field">
+            <label>&nbsp;</label>
+            <button class="btn btn-primary" id="proc-search">Найти</button>
+            <button class="btn" id="proc-export">В Excel</button>
+            <label class="check"><input type="checkbox" id="monitor-toggle"> Мониторинг</label>
+          </div>
+        </div>
+        <div id="proc-status" class="proc-status"></div>
+
+        <div class="cards">
+          <div class="card"><div class="card-label">Закупок</div><div class="card-value" id="a-count">—</div></div>
+          <div class="card"><div class="card-label">Сумма НМЦК</div><div class="card-value" id="a-sum">—</div></div>
+          <div class="card"><div class="card-label">Средняя НМЦК</div><div class="card-value" id="a-avg">—</div></div>
+          <div class="card"><div class="card-label">44-ФЗ / 223-ФЗ</div><div class="card-value" id="a-law">—</div></div>
+          <div class="card warn"><div class="card-label">Подача ≤ 3 дней</div><div class="card-value" id="a-soon">—</div></div>
+        </div>
+
+        <div class="proc-split">
+          <div class="table-wrap">
+            <div class="inline table-tools">
+              <input id="proc-filter" type="text" placeholder="Фильтр по названию, заказчику, номеру">
+              <select id="proc-sort">
+                <option value="price">Сначала дорогие</option>
+                <option value="deadline">Ближайший срок</option>
+                <option value="updated">Недавно обновлённые</option>
+              </select>
+            </div>
+            <table class="table">
+              <thead>
+                <tr><th>Номер / закон</th><th>Объект закупки</th><th>Заказчик</th><th>НМЦК</th><th>Подача до</th></tr>
+              </thead>
+              <tbody id="proc-body"></tbody>
+            </table>
+            <div id="proc-empty" class="empty">Нажмите «Найти» или скажите «Джарвис, найди закупки».</div>
+          </div>
+          <aside class="side">
+            <h3>Крупные заказчики</h3>
+            <ol id="top-customers" class="list"></ol>
+            <h3>По тегам</h3>
+            <ul id="by-tag" class="list"></ul>
+          </aside>
+        </div>
+      </div>
+
+      <!-- Настройки -->
+      <div class="tab-body" id="tab-settings">
+        <form id="settings-form" class="settings">
+          <fieldset>
+            <legend>Claude (умный режим)</legend>
+            <label for="api-key">API-ключ Anthropic</label>
+            <div class="inline">
+              <input id="api-key" type="password" autocomplete="off" placeholder="sk-ant-… (хранится в диспетчере учётных данных Windows)">
+              <button class="btn" type="button" id="save-key">Сохранить ключ</button>
+            </div>
+            <div id="key-status" class="hint"></div>
+            <label for="model">Модель</label>
+            <select id="model">
+              <option value="claude-opus-5-5">Claude Opus 5.5 — умнее</option>
+              <option value="claude-sonnet-5-5">Claude Sonnet 5.5 — дешевле</option>
+              <option value="claude-haiku-5-5">Claude Haiku 5.5 — быстрее и дешевле всего</option>
+            </select>
+            <label for="effort">Глубина размышлений</label>
+            <select id="effort">
+              <option value="low">Быстро (low)</option>
+              <option value="medium">Обычно (medium)</option>
+              <option value="high">Тщательно (high)</option>
+            </select>
+          </fieldset>
+          <fieldset>
+            <legend>Помощник</legend>
+            <label for="assistant-name">Имя помощника</label>
+            <input id="assistant-name" type="text">
+            <label for="user-name">Как обращаться к вам</label>
+            <input id="user-name" type="text">
+            <label for="wake-word">Слово-активатор</label>
+            <input id="wake-word" type="text">
+            <label for="city">Город для погоды</label>
+            <input id="city" type="text">
+            <label class="check"><input type="checkbox" id="voice-enabled"> Озвучивать ответы</label>
+          </fieldset>
+          <fieldset>
+            <legend>Программы</legend>
+            <label for="apps">По одной в строке: название = команда или путь к .exe</label>
+            <textarea id="apps" rows="8" spellcheck="false"></textarea>
+          </fieldset>
+          <fieldset>
+            <legend>Закупки</legend>
+            <label for="pages">Страниц на тег (по 50 закупок)</label>
+            <input id="pages" type="number" min="1" max="10">
+            <label for="interval">Мониторинг: проверять каждые, мин</label>
+            <input id="interval" type="number" min="10" max="1440">
+            <label for="ca-bundle">Сертификат Минцифры (если сайт ЕИС не открывается)</label>
+            <input id="ca-bundle" type="text" placeholder="C:\путь\к\russian_trusted_root_ca.pem">
+          </fieldset>
+          <div class="inline">
+            <button class="btn btn-primary" type="submit">Сохранить настройки</button>
+            <span id="settings-status" class="hint"></span>
+          </div>
+        </form>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" role="status"></div>
+  <script src="app.js"></script>
+</body>
+</html>
