@@ -1,0 +1,12 @@
+# Local models. Install torch for your platform first:
+#   https://pytorch.org/get-started/locally/  (e.g. --index-url https://download.pytorch.org/whl/cu124)
+-r requirements.txt
+torch>=2.3
+diffusers>=0.30
+transformers>=4.44
+accelerate>=0.33
+safetensors>=0.4
+insightface>=0.7.3
+onnxruntime-gpu>=1.18 ; platform_system != "Darwin"
+onnxruntime>=1.18 ; platform_system == "Darwin"
+opencv-python-headless>=4.9

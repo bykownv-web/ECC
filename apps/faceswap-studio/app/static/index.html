@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FaceSwap Studio</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <h1>FaceSwap Studio</h1>
+    <span id="status" class="status">Проверка сервера…</span>
+  </header>
+
+  <nav class="tabs" role="tablist">
+    <button class="tab active" data-tab="generate" role="tab">Генерация</button>
+    <button class="tab" data-tab="swap" role="tab">Подмена лица</button>
+    <button class="tab" data-tab="combo" role="tab">Генерация + лицо</button>
+  </nav>
+
+  <main>
+    <section class="panel">
+      <!-- Генерация -->
+      <form id="form-generate" class="tab-pane active" data-pane="generate">
+        <label>Промпт
+          <textarea name="prompt" rows="3" required maxlength="1000"
+            placeholder="portrait of an astronaut in a sunflower field, golden hour, 35mm photo"></textarea>
+        </label>
+        <label>Негативный промпт
+          <input name="negative_prompt" maxlength="1000" placeholder="blurry, low quality, deformed">
+        </label>
+        <div class="grid">
+          <label>Ширина <input name="width" type="number" value="1024" min="256" max="2048" step="64"></label>
+          <label>Высота <input name="height" type="number" value="1024" min="256" max="2048" step="64"></label>
+          <label>Шаги <input name="steps" type="number" value="30" min="1" max="80"></label>
+          <label>CFG <input name="guidance" type="number" value="7" min="0" max="20" step="0.5"></label>
+          <label>Seed <input name="seed" type="number" min="0" placeholder="случайный"></label>
+        </div>
+        <button type="submit">Сгенерировать</button>
+      </form>
+
+      <!-- Подмена лица -->
+      <form id="form-swap" class="tab-pane" data-pane="swap">
+        <div class="grid two">
+          <label class="drop">Лицо-источник
+            <input name="source" type="file" accept="image/*" required>
+            <img class="preview" alt="">
+          </label>
+          <label class="drop">Целевое изображение
+            <input name="target" type="file" accept="image/*" required>
+            <img class="preview" alt="">
+          </label>
+        </div>
+        <label class="check"><input name="all_faces" type="checkbox"> Заменить все лица на изображении</label>
+        <label class="check consent"><input name="consent" type="checkbox" required>
+          Я подтверждаю, что это моё лицо или у меня есть согласие человека на использование его изображения.
+        </label>
+        <button type="submit">Заменить лицо</button>
+      </form>
+
+      <!-- Генерация + лицо -->
+      <form id="form-combo" class="tab-pane" data-pane="combo">
+        <label class="drop">Лицо-источник
+          <input name="source" type="file" accept="image/*" required>
+          <img class="preview" alt="">
+        </label>
+        <label>Промпт (опишите сцену с одним человеком)
+          <textarea name="prompt" rows="3" required maxlength="1000"
+            placeholder="a knight in shining armor, castle background, cinematic lighting, portrait"></textarea>
+        </label>
+        <label>Негативный промпт
+          <input name="negative_prompt" maxlength="1000" placeholder="blurry, low quality, deformed">
+        </label>
+        <div class="grid">
+          <label>Ширина <input name="width" type="number" value="1024" min="256" max="2048" step="64"></label>
+          <label>Высота <input name="height" type="number" value="1024" min="256" max="2048" step="64"></label>
+          <label>Шаги <input name="steps" type="number" value="30" min="1" max="80"></label>
+          <label>Seed <input name="seed" type="number" min="0" placeholder="случайный"></label>
+        </div>
+        <label class="check consent"><input name="consent" type="checkbox" required>
+          Я подтверждаю, что это моё лицо или у меня есть согласие человека на использование его изображения.
+        </label>
+        <button type="submit">Создать</button>
+      </form>
+    </section>
+
+    <section class="panel result">
+      <div id="result-empty" class="empty">Здесь появится результат</div>
+      <div id="spinner" class="spinner" hidden></div>
+      <p id="error" class="error" hidden></p>
+      <figure id="result" hidden>
+        <img id="result-img" alt="Результат">
+        <figcaption>
+          <span id="result-meta"></span>
+          <a id="result-download" download>Скачать PNG</a>
+        </figcaption>
+      </figure>
+      <div id="history" class="history"></div>
+    </section>
+  </main>
+
+  <footer>
+    Все результаты помечаются как созданные ИИ. Не используйте приложение для обмана,
+    травли, интимных изображений или выдачи себя за другого человека.
+  </footer>
+  <script src="/app.js"></script>
+</body>
+</html>

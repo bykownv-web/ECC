@@ -1,0 +1,233 @@
+"""FastAPI application: REST API + static web UI."""
+
+from __future__ import annotations
+
+import io
+import logging
+import re
+import uuid
+from pathlib import Path
+from typing import Annotated
+
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from PIL import Image, ImageOps, UnidentifiedImageError
+from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
+
+from . import __version__
+from .backends import (
+    Backends,
+    BackendUnavailable,
+    GenerateParams,
+    NoFaceFound,
+    build_backends,
+)
+from .config import Settings
+from .safety import (
+    ContentBlocked,
+    NsfwClassifier,
+    apply_watermark,
+    check_prompt,
+    provenance_metadata,
+)
+
+log = logging.getLogger("faceswap")
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+IMAGE_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+CONSENT_ERROR = (
+    "Подтвердите, что у вас есть согласие человека, чьё лицо используется, или что это ваше собственное лицо."
+)
+
+
+class GenerateRequest(BaseModel):
+    prompt: str = Field(min_length=1, max_length=1000)
+    negative_prompt: str = Field(default="", max_length=1000)
+    width: int = Field(default=1024, ge=256, le=2048)
+    height: int = Field(default=1024, ge=256, le=2048)
+    steps: int | None = Field(default=None, ge=1)
+    guidance: float = Field(default=7.0, ge=0.0, le=20.0)
+    seed: int | None = Field(default=None, ge=0, le=2**32 - 1)
+
+
+class ImageResult(BaseModel):
+    id: str
+    url: str
+    seed: int | None = None
+    faces_swapped: int | None = None
+
+
+def create_app(settings: Settings | None = None, backends: Backends | None = None) -> FastAPI:
+    settings = settings or Settings.from_env()
+    backends = backends or build_backends(settings)
+    settings.output_dir.mkdir(parents=True, exist_ok=True)
+    nsfw = NsfwClassifier(
+        settings.nsfw_model_id if settings.backend != "mock" else "",
+        settings.nsfw_threshold,
+        backends.device,
+    )
+
+    app = FastAPI(title="FaceSwap Studio", version=__version__)
+    app.state.settings = settings
+    app.state.backends = backends
+
+    # ------------------------------------------------------------------ helpers
+
+    def snap(value: int) -> int:
+        """Clamp to max_side and round down to a multiple of 8 (diffusers requirement)."""
+        return max(256, min(value, settings.max_side)) // 8 * 8
+
+    async def read_image(upload: UploadFile, label: str) -> Image.Image:
+        limit = settings.max_upload_mb * 1024 * 1024
+        data = await upload.read(limit + 1)
+        if len(data) > limit:
+            raise HTTPException(413, f"{label}: файл больше {settings.max_upload_mb} МБ.")
+        try:
+            img = Image.open(io.BytesIO(data))
+            img.verify()
+            img = Image.open(io.BytesIO(data))
+            img = ImageOps.exif_transpose(img).convert("RGB")
+        except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as exc:
+            raise HTTPException(400, f"{label}: не удалось прочитать изображение.") from exc
+        if max(img.size) > settings.max_side:
+            img.thumbnail((settings.max_side, settings.max_side))
+        return img
+
+    def save(img: Image.Image, kind: str, prompt: str | None = None) -> str:
+        nsfw.check(img)
+        img = apply_watermark(img, visible=settings.watermark)
+        image_id = uuid.uuid4().hex
+        img.save(
+            settings.output_dir / f"{image_id}.png",
+            format="PNG",
+            pnginfo=provenance_metadata(kind, prompt),
+        )
+        return image_id
+
+    def run_generate(req: GenerateRequest) -> tuple[Image.Image, int]:
+        check_prompt(req.prompt, settings.extra_blocked_terms)
+        steps = min(req.steps or settings.default_steps, settings.max_steps)
+        params = GenerateParams(
+            prompt=req.prompt,
+            negative_prompt=req.negative_prompt,
+            width=snap(req.width),
+            height=snap(req.height),
+            steps=steps,
+            guidance=req.guidance,
+            seed=req.seed,
+        )
+        return backends.generator.generate(params)
+
+    # ------------------------------------------------------------------ errors
+
+    @app.exception_handler(ContentBlocked)
+    async def _blocked(_, exc: ContentBlocked):
+        return JSONResponse(status_code=422, content={"detail": str(exc)})
+
+    @app.exception_handler(NoFaceFound)
+    async def _noface(_, exc: NoFaceFound):
+        return JSONResponse(status_code=422, content={"detail": str(exc)})
+
+    @app.exception_handler(BackendUnavailable)
+    async def _unavailable(_, exc: BackendUnavailable):
+        return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+    # ------------------------------------------------------------------ routes
+
+    @app.get("/api/health")
+    def health() -> dict:
+        return {
+            "status": "ok",
+            "version": __version__,
+            "backend": backends.name,
+            "device": backends.device,
+            "model": settings.model_id if backends.name != "mock" else "mock",
+            "swap_model_present": backends.name == "mock" or settings.swap_model_path.is_file(),
+            "watermark": settings.watermark,
+        }
+
+    @app.post("/api/generate", response_model=ImageResult)
+    def generate(req: GenerateRequest) -> ImageResult:
+        img, seed = run_generate(req)
+        image_id = save(img, "generate", req.prompt)
+        return ImageResult(id=image_id, url=f"/api/images/{image_id}", seed=seed)
+
+    @app.post("/api/swap", response_model=ImageResult)
+    async def swap(
+        source: Annotated[UploadFile, File(description="Фото с лицом-источником")],
+        target: Annotated[UploadFile, File(description="Изображение, куда вставить лицо")],
+        consent: Annotated[bool, Form()] = False,
+        all_faces: Annotated[bool, Form()] = False,
+    ) -> ImageResult:
+        if not consent:
+            raise HTTPException(400, CONSENT_ERROR)
+        src = await read_image(source, "Источник")
+        dst = await read_image(target, "Цель")
+        img, count = await run_in_threadpool(backends.swapper.swap, src, dst, all_faces)
+        image_id = await run_in_threadpool(save, img, "swap")
+        return ImageResult(id=image_id, url=f"/api/images/{image_id}", faces_swapped=count)
+
+    @app.post("/api/generate-swap", response_model=ImageResult)
+    async def generate_swap(
+        source: Annotated[UploadFile, File(description="Фото с лицом-источником")],
+        prompt: Annotated[str, Form(min_length=1, max_length=1000)],
+        consent: Annotated[bool, Form()] = False,
+        negative_prompt: Annotated[str, Form(max_length=1000)] = "",
+        width: Annotated[int, Form(ge=256, le=2048)] = 1024,
+        height: Annotated[int, Form(ge=256, le=2048)] = 1024,
+        steps: Annotated[int | None, Form(ge=1)] = None,
+        guidance: Annotated[float, Form(ge=0.0, le=20.0)] = 7.0,
+        seed: Annotated[int | None, Form(ge=0, le=2**32 - 1)] = None,
+    ) -> ImageResult:
+        if not consent:
+            raise HTTPException(400, CONSENT_ERROR)
+        src = await read_image(source, "Источник")
+        req = GenerateRequest(
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            width=width,
+            height=height,
+            steps=steps,
+            guidance=guidance,
+            seed=seed,
+        )
+        generated, used_seed = await run_in_threadpool(run_generate, req)
+        img, count = await run_in_threadpool(backends.swapper.swap, src, generated, False)
+        image_id = await run_in_threadpool(save, img, "generate-swap", prompt)
+        return ImageResult(id=image_id, url=f"/api/images/{image_id}", seed=used_seed, faces_swapped=count)
+
+    @app.get("/api/images/{image_id}")
+    def get_image(image_id: str) -> FileResponse:
+        if not IMAGE_ID_RE.fullmatch(image_id):
+            raise HTTPException(404, "Изображение не найдено.")
+        path = settings.output_dir / f"{image_id}.png"
+        if not path.is_file():
+            raise HTTPException(404, "Изображение не найдено.")
+        return FileResponse(path, media_type="image/png", filename=f"{image_id}.png")
+
+    @app.delete("/api/images/{image_id}", status_code=204)
+    def delete_image(image_id: str) -> None:
+        if not IMAGE_ID_RE.fullmatch(image_id):
+            raise HTTPException(404, "Изображение не найдено.")
+        (settings.output_dir / f"{image_id}.png").unlink(missing_ok=True)
+
+    app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
+    return app
+
+
+def run() -> None:
+    import argparse
+
+    import uvicorn
+
+    parser = argparse.ArgumentParser(description="FaceSwap Studio")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8000)
+    args = parser.parse_args()
+    logging.basicConfig(level=logging.INFO)
+    uvicorn.run(create_app(), host=args.host, port=args.port)
+
+
+if __name__ == "__main__":
+    run()
