@@ -51,6 +51,17 @@ class LLM:
             return self._ollama(system, prompt, schema)
         if provider == "claude":
             return self._claude(system, prompt, schema)
+        if provider in ("openai", "gigachat"):
+            from .cloud_llm import CloudError, GigaChat, OpenAICompatChat
+
+            try:
+                if provider == "openai":
+                    client = OpenAICompatChat(str(self._config.get("openai_base_url", "")), str(self._config.get("openai_model", "")), "")
+                else:
+                    client = GigaChat(str(self._config.get("gigachat_model", "")), "", scope=str(self._config.get("gigachat_scope", "")))
+                return client.json(system, prompt, schema)
+            except CloudError as exc:
+                raise LLMError(str(exc)) from exc
         raise LLMError("Для этой функции нужен ИИ. Включите Ollama или Claude в настройках.")
 
     def _ollama(self, system: str, prompt: str, schema: dict[str, Any]) -> dict[str, Any]:

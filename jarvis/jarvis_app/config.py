@@ -21,9 +21,16 @@ KEYRING_ELEVEN = "elevenlabs-api-key"
 DEFAULT_CONFIG: dict[str, Any] = {
     "assistant_name": "Джарвис",
     "user_name": "сэр",
-    "ai_provider": "ollama",  # ollama — бесплатно на этом ПК; claude — по ключу; none — без ИИ
+    # ollama — на этом ПК; gigachat — Сбер; openai — любой OpenAI-совместимый (Hermes, YandexGPT, DeepSeek…);
+    # claude — Anthropic; none — без ИИ
+    "ai_provider": "ollama",
     "ollama_url": "http://127.0.0.1:11434",
     "ollama_model": "qwen2.5:7b",
+    "openai_preset": "hermes_openrouter",
+    "openai_base_url": "https://openrouter.ai/api/v1",
+    "openai_model": "nousresearch/hermes-4-70b",
+    "gigachat_model": "GigaChat-2",
+    "gigachat_scope": "GIGACHAT_API_PERS",
     "model": "claude-opus-5-5",
     "effort": "low",
     "voice_enabled": True,

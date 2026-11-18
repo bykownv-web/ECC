@@ -703,6 +703,11 @@
     updateVoiceUi();
     $('ai-provider').value = cfg.ai_provider || 'ollama';
     $('ollama-model').value = cfg.ollama_model || 'qwen2.5:7b';
+    $('oa-preset').value = cfg.openai_preset || 'hermes_openrouter';
+    $('oa-url').value = cfg.openai_base_url || '';
+    $('oa-model').value = cfg.openai_model || '';
+    $('gc-model').value = cfg.gigachat_model || 'GigaChat-2';
+    $('gc-scope').value = cfg.gigachat_scope || 'GIGACHAT_API_PERS';
     updateAiUi();
     $('model').value = cfg.model || 'claude-opus-5-5';
     $('effort').value = cfg.effort || 'low';
@@ -734,8 +739,54 @@
     renderTags();
   }
 
+  const OA_PRESETS = {
+    hermes_openrouter: ['https://openrouter.ai/api/v1', 'nousresearch/hermes-4-70b'],
+    hermes_nous: ['https://inference-api.nousresearch.com/v1', 'Hermes-4-70B'],
+    yandex: ['https://llm.api.cloud.yandex.net/v1', 'gpt://<ID_каталога>/yandexgpt/latest'],
+    deepseek: ['https://api.deepseek.com/v1', 'deepseek-chat'],
+    openrouter: ['https://openrouter.ai/api/v1', 'deepseek/deepseek-chat-v3-0324:free'],
+    groq: ['https://api.groq.com/openai/v1', 'llama-3.3-70b-versatile'],
+    lmstudio: ['http://127.0.0.1:1234/v1', 'local-model'],
+  };
+  $('oa-preset').addEventListener('change', () => {
+    const pr = OA_PRESETS[$('oa-preset').value];
+    if (pr) {
+      $('oa-url').value = pr[0];
+      $('oa-model').value = pr[1];
+    }
+  });
+  async function saveAiKey(provider, inputId) {
+    if (!api()) return;
+    const res = await api().save_ai_key(provider, $(inputId).value.trim());
+    toast(res.text);
+    if (res.ok) $(inputId).value = '';
+    applyState(await api().get_state());
+  }
+  $('gc-save').addEventListener('click', () => saveAiKey('gigachat', 'gc-key'));
+  $('oa-save').addEventListener('click', () => saveAiKey('openai', 'oa-key'));
+  $('test-ai').addEventListener('click', async () => {
+    if (!api()) return;
+    await api().save_settings(aiSettings());
+    applyState(await api().get_state());
+    toast('Проверяю ИИ…');
+    api().test_ai();
+  });
+  function aiSettings() {
+    return {
+      ai_provider: $('ai-provider').value,
+      ollama_model: $('ollama-model').value.trim() || 'qwen2.5:7b',
+      openai_preset: $('oa-preset').value,
+      openai_base_url: $('oa-url').value.trim(),
+      openai_model: $('oa-model').value.trim(),
+      gigachat_model: $('gc-model').value,
+      gigachat_scope: $('gc-scope').value,
+    };
+  }
+
   function updateAiUi() {
     const p = $('ai-provider').value;
+    $('gigachat-box').style.display = p === 'gigachat' ? 'flex' : 'none';
+    $('openai-box').style.display = p === 'openai' ? 'flex' : 'none';
     $('ollama-box').style.display = p === 'ollama' ? 'flex' : 'none';
     $('claude-box').style.display = p === 'claude' ? 'flex' : 'none';
   }
@@ -791,6 +842,8 @@
     voice.title = st.voice_error || '';
     $('eleven-status').textContent = st.has_eleven_key ? 'Ключ ElevenLabs сохранён.' : 'Ключ ElevenLabs не задан.';
     renderIntegrations(st);
+    $('gc-status').textContent = st.has_gigachat_key ? 'Ключ GigaChat сохранён.' : 'Ключ GigaChat не задан.';
+    $('oa-status').textContent = st.has_openai_key ? 'Ключ сервиса сохранён.' : 'Ключ не задан (для LM Studio не нужен).';
     const pc = (st.config && st.config.procurement) || {};
     if (!Array.isArray(pc.minus_words)) $('minus-words').value = (st.default_minus_words || []).join(', ');
     $('key-status').textContent = st.has_key ? 'Ключ сохранён.' : 'Ключ не задан — работают только простые команды.';
@@ -835,8 +888,7 @@
       tts_pitch: $('tts-pitch').value,
       tts_rate: $('tts-rate').value,
       eleven_voice_id: elevenVoiceId(),
-      ai_provider: $('ai-provider').value,
-      ollama_model: $('ollama-model').value.trim() || 'qwen2.5:7b',
+      ...aiSettings(),
       model: $('model').value,
       effort: $('effort').value,
       apps: apps,

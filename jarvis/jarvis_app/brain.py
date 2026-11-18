@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 from .config import Config, get_api_key
 from .local_commands import parse_command
+from .cloud_llm import CloudError, GigaChat, OpenAICompatChat
 from .ollama_brain import OllamaChat, OllamaError
 from .procurement import analyze, format_money
 from .tools import TOOL_DEFINITIONS, ToolBox, ToolError
@@ -36,8 +37,8 @@ class Brain:
         self._lock = threading.Lock()
         self._client = None
         self._client_key = ""
-        self._ollama: OllamaChat | None = None
-        self._ollama_sig: tuple[str, str, str] | None = None
+        self._ollama = None  # текущий чат: Ollama, GigaChat или OpenAI-совместимый
+        self._ollama_sig: tuple[str, ...] | None = None
 
     def reset(self) -> None:
         with self._lock:
@@ -50,7 +51,7 @@ class Brain:
 
     def has_ai(self) -> bool:
         provider = self.provider()
-        if provider == "ollama":
+        if provider in ("ollama", "openai", "gigachat"):
             return True
         return provider == "claude" and bool(get_api_key())
 
@@ -60,14 +61,29 @@ class Brain:
             user=self._config.get("user_name", "сэр"),
         )
 
+    def _get_cloud(self):
+        provider = self.provider()
+        if provider == "openai":
+            sig = ("openai", str(self._config.get("openai_base_url", "")), str(self._config.get("openai_model", "")), self._system_prompt())
+            if self._ollama_sig != sig:
+                self._ollama = OpenAICompatChat(sig[1], sig[2], sig[3], self._toolbox, on_tool=self._on_tool)
+                self._ollama_sig = sig
+        else:
+            sig = ("gigachat", str(self._config.get("gigachat_model", "")), str(self._config.get("gigachat_scope", "")), self._system_prompt())
+            if self._ollama_sig != sig:
+                self._ollama = GigaChat(sig[1], sig[3], self._toolbox, on_tool=self._on_tool, scope=sig[2])
+                self._ollama_sig = sig
+        return self._ollama
+
     def _get_ollama(self) -> OllamaChat:
         sig = (
+            "ollama",
             str(self._config.get("ollama_url", "")),
             str(self._config.get("ollama_model", "")),
             self._system_prompt(),
         )
         if self._ollama is None or sig != self._ollama_sig:
-            self._ollama = OllamaChat(sig[0], sig[1], sig[2], self._toolbox, on_tool=self._on_tool)
+            self._ollama = OllamaChat(sig[1], sig[2], sig[3], self._toolbox, on_tool=self._on_tool)
             self._ollama_sig = sig
         return self._ollama
 
@@ -87,6 +103,14 @@ class Brain:
         if not text:
             return ""
         provider = self.provider()
+        if provider in ("openai", "gigachat"):
+            with self._lock:
+                try:
+                    return self._get_cloud().ask(text)
+                except CloudError as exc:
+                    if parse_command(text) is not None:
+                        return self._local(text)
+                    return str(exc)
         if provider == "ollama":
             with self._lock:
                 try:

@@ -61,8 +61,9 @@ SETTINGS_KEYS = {
     "assistant_name", "user_name", "model", "effort", "voice_enabled", "wake_word", "city", "apps",
     "tts_voice", "tts_rate", "tts_pitch", "eleven_voice_id",
     "ai_provider", "ollama_url", "ollama_model",
+    "openai_preset", "openai_base_url", "openai_model", "gigachat_model", "gigachat_scope",
 }
-AI_PROVIDERS = {"ollama", "claude", "none"}
+AI_PROVIDERS = {"ollama", "gigachat", "openai", "claude", "none"}
 PROCUREMENT_KEYS = {"strict", "minus_words", "tags", "fz44", "fz223", "only_active", "price_from", "price_to", "pages_per_tag",
                     "monitor_interval_min", "ca_bundle"}
 
@@ -153,6 +154,8 @@ class JarvisApi:
             "ai_ok": self._brain.has_ai(),
             "has_key": bool(get_api_key()),
             "has_eleven_key": bool(get_elevenlabs_key()),
+            "has_openai_key": bool(get_secret("openai-compatible-api-key")),
+            "has_gigachat_key": bool(get_secret("gigachat-auth-key")),
             "default_minus_words": DEFAULT_MINUS_WORDS,
             "telegram": self._telegram.status(),
             "email": self.email_status(),
@@ -178,8 +181,40 @@ class JarvisApi:
         except Exception:
             return {"cpu": None, "ram": None, "disk": None}
 
+    def save_ai_key(self, provider: str, key: str) -> dict[str, Any]:
+        from .cloud_llm import GIGACHAT_KEY, OPENAI_KEY
+
+        name = {"openai": OPENAI_KEY, "gigachat": GIGACHAT_KEY}.get(provider)
+        if not name:
+            return {"ok": False, "text": "Неизвестный сервис."}
+        if not set_secret(name, (key or "").strip()):
+            return {"ok": False, "text": "Не удалось сохранить ключ в диспетчере учётных данных Windows."}
+        self._brain.reset()
+        return {"ok": True, "text": "Ключ сохранён." if key else "Ключ удалён."}
+
+    def test_ai(self) -> None:
+        """Короткий запрос к выбранной модели: проверка ключа, адреса и скорости."""
+        def work() -> None:
+            import time as _t
+
+            from .llm import LLM, LLMError
+
+            started = _t.time()
+            try:
+                LLM(self._config).json("Ответь JSON.", 'Верни {"ok": true}', {"type": "object", "properties": {"ok": {"type": "boolean"}},
+                                                                            "required": ["ok"], "additionalProperties": False})
+                self._emit("toast", {"text": f"ИИ отвечает: {self._ai_label()}, {(_t.time() - started):.1f} с."})
+            except LLMError as exc:
+                self._emit("error", {"text": f"Проверка ИИ: {exc}"})
+
+        self._run_async(work)
+
     def _ai_label(self) -> str:
         provider = self._brain.provider()
+        if provider == "gigachat":
+            return f"ИИ: GigaChat ({self._config.get('gigachat_model', '')})"
+        if provider == "openai":
+            return f"ИИ: {self._config.get('openai_model', '')}"
         if provider == "ollama":
             return f"ИИ: Ollama ({self._config.get('ollama_model', '')})"
         if provider == "claude" and get_api_key():
@@ -207,8 +242,11 @@ class JarvisApi:
         clean: dict[str, Any] = {k: v for k, v in values.items() if k in SETTINGS_KEYS}
         if "ai_provider" in clean and clean["ai_provider"] not in AI_PROVIDERS:
             clean.pop("ai_provider")
-        if "ollama_url" in clean and not str(clean["ollama_url"]).startswith(("http://", "https://")):
-            clean.pop("ollama_url")
+        for url_key in ("ollama_url", "openai_base_url"):
+            if url_key in clean and not str(clean[url_key]).startswith(("http://", "https://")):
+                clean.pop(url_key)
+        if clean.get("gigachat_scope") not in (None, "GIGACHAT_API_PERS", "GIGACHAT_API_B2B", "GIGACHAT_API_CORP"):
+            clean.pop("gigachat_scope")
         if isinstance(clean.get("apps"), dict):
             clean["apps"] = {
                 str(k).strip().lower(): str(v).strip()

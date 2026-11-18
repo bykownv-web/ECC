@@ -306,7 +306,9 @@
             <legend>ИИ (умный режим)</legend>
             <label for="ai-provider">Кто думает за Джарвиса</label>
             <select id="ai-provider">
-              <option value="ollama">Ollama — бесплатно, на этом компьютере</option>
+              <option value="gigachat">GigaChat (Сбер) — быстро, без VPN, бесплатный лимит</option>
+              <option value="openai">Облачная модель: Hermes, YandexGPT, DeepSeek, OpenRouter…</option>
+              <option value="ollama">Ollama — бесплатно, на этом компьютере (медленно без видеокарты)</option>
               <option value="claude">Claude — платно, по ключу Anthropic</option>
               <option value="none">Без ИИ — только простые команды</option>
             </select>
@@ -324,6 +326,47 @@
               </datalist>
               <div id="ollama-status" class="hint">qwen2.5:7b — для ПК от 16 ГБ памяти, qwen2.5:3b — для слабых ПК.</div>
             </div>
+            <div id="gigachat-box" class="eleven-box">
+              <label for="gc-key">Ключ авторизации GigaChat (developers.sber.ru → проект → API-ключ)</label>
+              <div class="inline">
+                <input id="gc-key" type="password" autocomplete="off" placeholder="Authorization key (длинная строка, заканчивается на ==)">
+                <button class="btn" type="button" id="gc-save">Сохранить</button>
+              </div>
+              <div class="inline">
+                <select id="gc-model">
+                  <option value="GigaChat-2">GigaChat 2 Lite — быстрее, бесплатный лимит больше</option>
+                  <option value="GigaChat-2-Pro">GigaChat 2 Pro — умнее</option>
+                  <option value="GigaChat-2-Max">GigaChat 2 Max — самый умный</option>
+                </select>
+                <select id="gc-scope" title="Тип доступа">
+                  <option value="GIGACHAT_API_PERS">Физлицо</option>
+                  <option value="GIGACHAT_API_B2B">Юрлицо (B2B)</option>
+                  <option value="GIGACHAT_API_CORP">Юрлицо (CORP)</option>
+                </select>
+              </div>
+              <div id="gc-status" class="hint"></div>
+            </div>
+            <div id="openai-box" class="eleven-box">
+              <label for="oa-preset">Сервис</label>
+              <select id="oa-preset">
+                <option value="hermes_openrouter">Hermes 4 через OpenRouter</option>
+                <option value="hermes_nous">Hermes 4 через Nous Portal</option>
+                <option value="yandex">YandexGPT (Yandex Cloud)</option>
+                <option value="deepseek">DeepSeek</option>
+                <option value="openrouter">OpenRouter (бесплатные модели)</option>
+                <option value="groq">Groq</option>
+                <option value="lmstudio">LM Studio на этом ПК (с видеокартой)</option>
+                <option value="custom">Другой OpenAI-совместимый сервис</option>
+              </select>
+              <input id="oa-url" type="text" placeholder="Адрес API, например https://openrouter.ai/api/v1">
+              <input id="oa-model" type="text" placeholder="Модель">
+              <div class="inline">
+                <input id="oa-key" type="password" autocomplete="off" placeholder="API-ключ сервиса (хранится в диспетчере учётных данных Windows)">
+                <button class="btn" type="button" id="oa-save">Сохранить ключ</button>
+              </div>
+              <div id="oa-status" class="hint"></div>
+            </div>
+            <button class="btn btn-ghost" type="button" id="test-ai">Проверить ИИ (скорость ответа)</button>
             <div id="claude-box" class="eleven-box">
             <label for="api-key">API-ключ Anthropic</label>
             <div class="inline">
