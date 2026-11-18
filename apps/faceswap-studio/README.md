@@ -48,6 +48,27 @@ pip install -r requirements-gpu.txt
 
 Модель генерации скачивается с Hugging Face при первом запросе (в `~/.cache/huggingface`).
 
+### Свои модели и LoRA (Civitai и др.)
+
+Файлы `.safetensors` кладутся в две папки, приложение находит их само (перезапуск не нужен):
+
+```text
+models/
+  checkpoints/   ← полные модели, 2–7 ГБ (например juggernautXL_ragnarok.safetensors)
+  loras/         ← LoRA, обычно 10–300 МБ (например edgCrystalButterflyv1.safetensors)
+```
+
+В интерфейсе появится выпадающий список «Модель» и кнопка «+ LoRA» (до 5 штук, вес от −2 до 2).
+
+- Поддерживаются чекпоинты **SDXL** (Juggernaut XL, Illustrious, Pony, RealVisXL…) и **SD 1.5**. Архитектура определяется автоматически.
+- LoRA должна быть обучена под ту же базу, что и выбранная модель: LoRA для SDXL не работает с SD 1.5 и наоборот. Базу видно на странице модели на Civitai («Base Model»).
+- Многие LoRA срабатывают только со своими trigger words, их тоже берите со страницы модели и добавляйте в промпт.
+- Переключение чекпоинта перезагружает модель (10–60 с). Одновременно в памяти держится одна модель.
+- Пути к папкам можно поменять через `FSS_CHECKPOINTS_DIR` и `FSS_LORAS_DIR`.
+
+Для чекпоинтов Illustrious обычно лучше CFG 4–6 и около 25–30 шагов, для Juggernaut XL CFG 4–7 и 30–40 шагов.
+Фильтры контента и метка `AI-generated` действуют для любых моделей.
+
 ## Запуск
 
 ```bash
@@ -69,6 +90,8 @@ FSS_BACKEND=mock python -m app.main
 | `FSS_BACKEND` | `diffusers` | `diffusers` — реальные модели, `mock` — заглушка |
 | `FSS_MODEL_ID` | `stabilityai/stable-diffusion-xl-base-1.0` | Модель генерации (id на HF или локальный путь) |
 | `FSS_DEVICE` | `auto` | `cuda`, `mps`, `cpu` или `auto` |
+| `FSS_CHECKPOINTS_DIR` | `models/checkpoints/` | Папка с локальными чекпоинтами `.safetensors` |
+| `FSS_LORAS_DIR` | `models/loras/` | Папка с LoRA `.safetensors` |
 | `FSS_SWAP_MODEL_PATH` | `models/inswapper_128.onnx` | Путь к модели подмены лица |
 | `FSS_FACE_PACK` | `buffalo_l` | Пак детекции InsightFace |
 | `FSS_NSFW_MODEL` | `Falconsai/nsfw_image_detection` | NSFW-классификатор (пустая строка — выключить) |
@@ -88,9 +111,10 @@ FSS_BACKEND=mock python -m app.main
 | Метод | Путь | Тело |
 |---|---|---|
 | `GET` | `/api/health` | — |
-| `POST` | `/api/generate` | JSON: `prompt`, `negative_prompt`, `width`, `height`, `steps`, `guidance`, `seed` |
+| `GET` | `/api/models` | — (список чекпоинтов и LoRA) |
+| `POST` | `/api/generate` | JSON: `prompt`, `negative_prompt`, `width`, `height`, `steps`, `guidance`, `seed`, `model`, `loras: [{name, weight}]` |
 | `POST` | `/api/swap` | multipart: `source`, `target`, `consent=true`, `all_faces` |
-| `POST` | `/api/generate-swap` | multipart: `source`, `prompt`, `consent=true`, + параметры генерации |
+| `POST` | `/api/generate-swap` | multipart: `source`, `prompt`, `consent=true`, + параметры генерации, `loras` как JSON-строка |
 | `GET` | `/api/images/{id}` | — (PNG) |
 | `DELETE` | `/api/images/{id}` | — |
 
@@ -107,7 +131,8 @@ curl -X POST localhost:8000/api/swap \
 ```text
 app/
   main.py      — FastAPI: маршруты, загрузка файлов, сохранение результатов
-  backends.py  — DiffusersGenerator, InsightFaceSwapper и mock-реализации
+  backends.py  — DiffusersGenerator (HF / .safetensors + LoRA), InsightFaceSwapper, mock
+  registry.py  — поиск локальных моделей и безопасное разрешение имён файлов
   safety.py    — фильтр промптов, NSFW-проверка, водяной знак, метаданные
   config.py    — настройки из переменных окружения
   static/      — веб-интерфейс (HTML/CSS/JS без сборки)

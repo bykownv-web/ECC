@@ -29,6 +29,13 @@
         <label>Негативный промпт
           <input name="negative_prompt" maxlength="1000" placeholder="blurry, low quality, deformed">
         </label>
+        <div class="model-block">
+          <label>Модель
+            <select name="model"><option value="">По умолчанию</option></select>
+          </label>
+          <div class="loras"></div>
+          <button type="button" class="secondary add-lora">+ LoRA</button>
+        </div>
         <div class="grid">
           <label>Ширина <input name="width" type="number" value="1024" min="256" max="2048" step="64"></label>
           <label>Высота <input name="height" type="number" value="1024" min="256" max="2048" step="64"></label>
@@ -71,6 +78,13 @@
         <label>Негативный промпт
           <input name="negative_prompt" maxlength="1000" placeholder="blurry, low quality, deformed">
         </label>
+        <div class="model-block">
+          <label>Модель
+            <select name="model"><option value="">По умолчанию</option></select>
+          </label>
+          <div class="loras"></div>
+          <button type="button" class="secondary add-lora">+ LoRA</button>
+        </div>
         <div class="grid">
           <label>Ширина <input name="width" type="number" value="1024" min="256" max="2048" step="64"></label>
           <label>Высота <input name="height" type="number" value="1024" min="256" max="2048" step="64"></label>
@@ -103,6 +117,13 @@
     Все результаты помечаются как созданные ИИ. Не используйте приложение для обмана,
     травли, интимных изображений или выдачи себя за другого человека.
   </footer>
+  <template id="lora-row">
+    <div class="lora-row">
+      <select name="lora_name" aria-label="LoRA"></select>
+      <input name="lora_weight" type="number" value="0.8" min="-2" max="2" step="0.05" aria-label="Вес LoRA">
+      <button type="button" class="secondary remove-lora" aria-label="Убрать">✕</button>
+    </div>
+  </template>
   <script src="/app.js"></script>
 </body>
 </html>

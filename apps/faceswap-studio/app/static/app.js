@@ -49,6 +49,43 @@
       els.status.className = "status bad";
     });
 
+  // Models / LoRA
+  let loraNames = [];
+  const MAX_LORAS = 5;
+
+  function addLoraRow(block) {
+    const list = $(".loras", block);
+    if (!loraNames.length || list.children.length >= MAX_LORAS) return;
+    const row = $("#lora-row").content.firstElementChild.cloneNode(true);
+    const sel = $("select", row);
+    loraNames.forEach((n) => sel.add(new Option(n, n)));
+    $(".remove-lora", row).addEventListener("click", () => list.removeChild(row));
+    list.append(row);
+  }
+
+  fetch("/api/models")
+    .then((r) => r.json())
+    .then((m) => {
+      loraNames = m.loras.map((l) => l.name);
+      $$(".model-block").forEach((block) => {
+        const sel = $('select[name="model"]', block);
+        sel.options[0].textContent = `По умолчанию (${m.default})`;
+        m.checkpoints.forEach((c) => sel.add(new Option(`${c.name} · ${c.size_mb} МБ`, c.name)));
+        const add = $(".add-lora", block);
+        add.disabled = !loraNames.length;
+        add.title = loraNames.length ? "" : "Положите .safetensors в models/loras/";
+        add.addEventListener("click", () => addLoraRow(block));
+      });
+    })
+    .catch(() => {});
+
+  function collectLoras(form) {
+    return $$(".lora-row", form).map((row) => ({
+      name: $("select", row).value,
+      weight: parseFloat($("input", row).value || "0.8"),
+    }));
+  }
+
   function setBusy(form, busy) {
     const btn = $('button[type="submit"]', form);
     btn.disabled = busy;
@@ -98,14 +135,16 @@
         const fd = new FormData(form);
         const body = {};
         for (const [k, v] of fd.entries()) {
-          if (v === "") continue;
+          if (v === "" || k.startsWith("lora_")) continue;
           body[k] = ["width", "height", "steps", "seed"].includes(k) ? parseInt(v, 10)
             : k === "guidance" ? parseFloat(v) : v;
         }
+        body.loras = collectLoras(form);
         init = { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
       } else {
         const fd = new FormData(form);
-        for (const [k, v] of Array.from(fd.entries())) if (v === "") fd.delete(k);
+        for (const [k, v] of Array.from(fd.entries())) if (v === "" || k.startsWith("lora_")) fd.delete(k);
+        if ($(".model-block", form)) fd.set("loras", JSON.stringify(collectLoras(form)));
         $$('input[type="checkbox"]', form).forEach((cb) => fd.set(cb.name, cb.checked ? "true" : "false"));
         init = { method: "POST", body: fd };
       }

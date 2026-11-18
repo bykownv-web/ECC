@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 import logging
 import re
 import uuid
@@ -13,7 +14,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, ImageOps, UnidentifiedImageError
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from starlette.concurrency import run_in_threadpool
 
 from . import __version__
@@ -25,6 +26,7 @@ from .backends import (
     build_backends,
 )
 from .config import Settings
+from .registry import list_models, resolve_model
 from .safety import (
     ContentBlocked,
     NsfwClassifier,
@@ -41,6 +43,11 @@ CONSENT_ERROR = (
 )
 
 
+class LoraSpec(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    weight: float = Field(default=0.8, ge=-2.0, le=2.0)
+
+
 class GenerateRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=1000)
     negative_prompt: str = Field(default="", max_length=1000)
@@ -49,6 +56,9 @@ class GenerateRequest(BaseModel):
     steps: int | None = Field(default=None, ge=1)
     guidance: float = Field(default=7.0, ge=0.0, le=20.0)
     seed: int | None = Field(default=None, ge=0, le=2**32 - 1)
+    # File name from /api/models -> checkpoints; empty = default model
+    model: str | None = Field(default=None, max_length=255)
+    loras: list[LoraSpec] = Field(default_factory=list)
 
 
 class ImageResult(BaseModel):
@@ -105,8 +115,30 @@ def create_app(settings: Settings | None = None, backends: Backends | None = Non
         )
         return image_id
 
+    def parse_loras(raw: str) -> list[LoraSpec]:
+        try:
+            data = json.loads(raw or "[]")
+            if not isinstance(data, list):
+                raise ValueError
+            return [LoraSpec.model_validate(item) for item in data]
+        except (ValueError, ValidationError) as exc:
+            raise HTTPException(400, "Поле loras: ожидается JSON-список {name, weight}.") from exc
+
     def run_generate(req: GenerateRequest) -> tuple[Image.Image, int]:
         check_prompt(req.prompt, settings.extra_blocked_terms)
+        checkpoint = None
+        if req.model:
+            checkpoint = resolve_model(settings.checkpoints_dir, req.model)
+            if checkpoint is None:
+                raise HTTPException(400, f"Модель не найдена: {req.model}")
+        if len(req.loras) > settings.max_loras:
+            raise HTTPException(400, f"Не больше {settings.max_loras} LoRA за раз.")
+        loras = []
+        for spec in req.loras:
+            path = resolve_model(settings.loras_dir, spec.name)
+            if path is None:
+                raise HTTPException(400, f"LoRA не найдена: {spec.name}")
+            loras.append((path, spec.weight))
         steps = min(req.steps or settings.default_steps, settings.max_steps)
         params = GenerateParams(
             prompt=req.prompt,
@@ -116,6 +148,8 @@ def create_app(settings: Settings | None = None, backends: Backends | None = Non
             steps=steps,
             guidance=req.guidance,
             seed=req.seed,
+            checkpoint=checkpoint,
+            loras=tuple(loras),
         )
         return backends.generator.generate(params)
 
@@ -145,6 +179,14 @@ def create_app(settings: Settings | None = None, backends: Backends | None = Non
             "model": settings.model_id if backends.name != "mock" else "mock",
             "swap_model_present": backends.name == "mock" or settings.swap_model_path.is_file(),
             "watermark": settings.watermark,
+        }
+
+    @app.get("/api/models")
+    def models() -> dict:
+        return {
+            "default": settings.model_id if backends.name != "mock" else "mock",
+            "checkpoints": list_models(settings.checkpoints_dir),
+            "loras": list_models(settings.loras_dir),
         }
 
     @app.post("/api/generate", response_model=ImageResult)
@@ -179,6 +221,10 @@ def create_app(settings: Settings | None = None, backends: Backends | None = Non
         steps: Annotated[int | None, Form(ge=1)] = None,
         guidance: Annotated[float, Form(ge=0.0, le=20.0)] = 7.0,
         seed: Annotated[int | None, Form(ge=0, le=2**32 - 1)] = None,
+        model: Annotated[str | None, Form(max_length=255)] = None,
+        loras: Annotated[
+            str, Form(max_length=4000, description='JSON: [{"name": ..., "weight": ...}]')
+        ] = "[]",
     ) -> ImageResult:
         if not consent:
             raise HTTPException(400, CONSENT_ERROR)
@@ -191,6 +237,8 @@ def create_app(settings: Settings | None = None, backends: Backends | None = Non
             steps=steps,
             guidance=guidance,
             seed=seed,
+            model=model or None,
+            loras=parse_loras(loras),
         )
         generated, used_seed = await run_in_threadpool(run_generate, req)
         img, count = await run_in_threadpool(backends.swapper.swap, src, generated, False)

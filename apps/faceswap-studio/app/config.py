@@ -27,6 +27,10 @@ class Settings:
     backend: str = "diffusers"
     # Hugging Face id or local path of a text-to-image model
     model_id: str = "stabilityai/stable-diffusion-xl-base-1.0"
+    # Local single-file models (.safetensors from Civitai etc.)
+    checkpoints_dir: Path = APP_ROOT / "models" / "checkpoints"
+    loras_dir: Path = APP_ROOT / "models" / "loras"
+    max_loras: int = 5
     # "auto" picks cuda > mps > cpu
     device: str = "auto"
     # InsightFace swapper weights (must be placed manually, see README)
@@ -51,6 +55,8 @@ class Settings:
             backend=os.environ.get("FSS_BACKEND", cls.backend).strip().lower(),
             model_id=os.environ.get("FSS_MODEL_ID", cls.model_id),
             device=os.environ.get("FSS_DEVICE", cls.device),
+            checkpoints_dir=Path(os.environ.get("FSS_CHECKPOINTS_DIR", str(cls.checkpoints_dir))),
+            loras_dir=Path(os.environ.get("FSS_LORAS_DIR", str(cls.loras_dir))),
             swap_model_path=Path(os.environ.get("FSS_SWAP_MODEL_PATH", str(cls.swap_model_path))),
             face_analysis_pack=os.environ.get("FSS_FACE_PACK", cls.face_analysis_pack),
             nsfw_model_id=os.environ.get("FSS_NSFW_MODEL", cls.nsfw_model_id),

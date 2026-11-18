@@ -1,5 +1,10 @@
 outputs/
-models/*
+models/**
+!models/
 !models/.gitkeep
+!models/checkpoints/
+!models/checkpoints/.gitkeep
+!models/loras/
+!models/loras/.gitkeep
 __pycache__/
 .venv/

@@ -162,3 +162,105 @@ def test_delete_image(client):
     url = client.post("/api/generate", json={"prompt": "tree", "width": 256, "height": 256}).json()["url"]
     assert client.delete(url).status_code == 204
     assert client.get(url).status_code == 404
+
+
+# ---------------------------------------------------------------- local models / LoRA
+
+
+@pytest.fixture
+def models_client(tmp_path):
+    ckpt, loras = tmp_path / "checkpoints", tmp_path / "loras"
+    ckpt.mkdir()
+    loras.mkdir()
+    (ckpt / "juggernautXL_ragnarok.safetensors").write_bytes(b"x" * 1024)
+    (ckpt / "notes.txt").write_text("ignored")
+    (loras / "edgCrystalButterflyv1.safetensors").write_bytes(b"x")
+    (tmp_path / "outside.safetensors").write_bytes(b"x")
+    s = replace(
+        Settings(), backend="mock", output_dir=tmp_path / "out", checkpoints_dir=ckpt, loras_dir=loras
+    )
+    app = create_app(s)
+    calls = []
+    original = app.state.backends.generator.generate
+
+    def spy(params):
+        calls.append(params)
+        return original(params)
+
+    app.state.backends.generator.generate = spy
+    return TestClient(app), calls
+
+
+def test_models_listing(models_client):
+    client, _ = models_client
+    body = client.get("/api/models").json()
+    assert [c["name"] for c in body["checkpoints"]] == ["juggernautXL_ragnarok.safetensors"]
+    assert [lo["name"] for lo in body["loras"]] == ["edgCrystalButterflyv1.safetensors"]
+
+
+def test_models_listing_without_dirs(client):
+    body = client.get("/api/models").json()
+    assert body["checkpoints"] == [] and body["loras"] == []
+
+
+def test_generate_with_checkpoint_and_lora(models_client):
+    client, calls = models_client
+    res = client.post(
+        "/api/generate",
+        json={
+            "prompt": "crystal butterfly",
+            "width": 256,
+            "height": 256,
+            "model": "juggernautXL_ragnarok.safetensors",
+            "loras": [{"name": "edgCrystalButterflyv1.safetensors", "weight": 0.6}],
+        },
+    )
+    assert res.status_code == 200, res.text
+    params = calls[-1]
+    assert params.checkpoint.name == "juggernautXL_ragnarok.safetensors"
+    assert [(p.name, w) for p, w in params.loras] == [("edgCrystalButterflyv1.safetensors", 0.6)]
+
+
+@pytest.mark.parametrize(
+    "model", ["missing.safetensors", "../outside.safetensors", "notes.txt", "/etc/passwd"]
+)
+def test_generate_rejects_unknown_or_unsafe_model(models_client, model):
+    client, _ = models_client
+    res = client.post("/api/generate", json={"prompt": "x", "model": model})
+    assert res.status_code == 400
+
+
+def test_generate_rejects_unknown_lora_and_too_many(models_client):
+    client, _ = models_client
+    bad = client.post("/api/generate", json={"prompt": "x", "loras": [{"name": "nope.safetensors"}]})
+    assert bad.status_code == 400
+    many = [{"name": "edgCrystalButterflyv1.safetensors"}] * 6
+    assert client.post("/api/generate", json={"prompt": "x", "loras": many}).status_code == 400
+
+
+def test_generate_swap_with_model_form_fields(models_client):
+    client, calls = models_client
+    res = client.post(
+        "/api/generate-swap",
+        files=files(source=png_bytes()),
+        data={
+            "prompt": "portrait",
+            "consent": "true",
+            "width": "256",
+            "height": "256",
+            "model": "juggernautXL_ragnarok.safetensors",
+            "loras": '[{"name": "edgCrystalButterflyv1.safetensors", "weight": 1}]',
+        },
+    )
+    assert res.status_code == 200, res.text
+    assert calls[-1].checkpoint.name == "juggernautXL_ragnarok.safetensors"
+
+
+def test_generate_swap_rejects_bad_lora_json(models_client):
+    client, _ = models_client
+    res = client.post(
+        "/api/generate-swap",
+        files=files(source=png_bytes()),
+        data={"prompt": "portrait", "consent": "true", "loras": "{not json"},
+    )
+    assert res.status_code == 400

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
 import numpy as np
@@ -32,6 +33,10 @@ class GenerateParams:
     steps: int = 30
     guidance: float = 7.0
     seed: int | None = None
+    # Local .safetensors checkpoint; None = the default model (FSS_MODEL_ID)
+    checkpoint: Path | None = None
+    # (LoRA file, weight) pairs
+    loras: tuple[tuple[Path, float], ...] = ()
 
 
 class Generator(Protocol):
@@ -63,55 +68,105 @@ def resolve_device(requested: str) -> str:
 
 
 class DiffusersGenerator:
-    """Text-to-image via any diffusers AutoPipeline-compatible model (SD 1.5, SDXL, ...)."""
+    """Text-to-image via diffusers: a Hugging Face model or a local single-file checkpoint,
+    optionally with LoRA adapters. One pipeline is kept in memory; switching checkpoints reloads it."""
 
     def __init__(self, model_id: str, device: str) -> None:
         self.model_id = model_id
         self.device = device
         self._pipe = None
+        self._pipe_key: str | None = None
         self._lock = threading.Lock()
 
-    def _load(self):
-        if self._pipe is not None:
-            return self._pipe
+    def _imports(self):
         try:
+            import diffusers
             import torch
-            from diffusers import AutoPipelineForText2Image
         except ImportError as exc:
             raise BackendUnavailable("Не установлены torch/diffusers. См. requirements-gpu.txt.") from exc
+        return torch, diffusers
+
+    def _load(self, checkpoint: Path | None):
+        key = str(checkpoint) if checkpoint else self.model_id
+        if self._pipe is not None and self._pipe_key == key:
+            return self._pipe
+        torch, diffusers = self._imports()
+        # Free the previous pipeline before loading the next one (SDXL needs ~7 GB VRAM)
+        self._pipe, self._pipe_key = None, None
+        if self.device == "cuda":
+            torch.cuda.empty_cache()
         dtype = torch.float16 if self.device in {"cuda", "mps"} else torch.float32
-        log.info("Loading %s on %s (%s)", self.model_id, self.device, dtype)
-        kwargs = {"torch_dtype": dtype}
-        if dtype == torch.float16:
-            kwargs["variant"] = "fp16"
-        try:
-            pipe = AutoPipelineForText2Image.from_pretrained(self.model_id, **kwargs)
-        except (OSError, ValueError):
-            kwargs.pop("variant", None)
-            pipe = AutoPipelineForText2Image.from_pretrained(self.model_id, **kwargs)
+        log.info("Loading %s on %s (%s)", key, self.device, dtype)
+        if checkpoint is not None:
+            pipe = self._load_single_file(diffusers, checkpoint, dtype)
+        else:
+            kwargs = {"torch_dtype": dtype}
+            if dtype == torch.float16:
+                kwargs["variant"] = "fp16"
+            try:
+                pipe = diffusers.AutoPipelineForText2Image.from_pretrained(self.model_id, **kwargs)
+            except (OSError, ValueError):
+                kwargs.pop("variant", None)
+                pipe = diffusers.AutoPipelineForText2Image.from_pretrained(self.model_id, **kwargs)
         pipe = pipe.to(self.device)
         if self.device == "cuda":
             pipe.enable_attention_slicing()
-        self._pipe = pipe
+        self._pipe, self._pipe_key = pipe, key
         return pipe
 
-    def generate(self, params: GenerateParams) -> tuple[Image.Image, int]:
-        import torch
+    @staticmethod
+    def _load_single_file(diffusers, checkpoint: Path, dtype):
+        """Civitai-style .safetensors: try SDXL (Juggernaut, Illustrious, Pony...), then SD 1.5."""
+        errors = []
+        for cls_name in ("StableDiffusionXLPipeline", "StableDiffusionPipeline"):
+            cls = getattr(diffusers, cls_name)
+            try:
+                return cls.from_single_file(str(checkpoint), torch_dtype=dtype)
+            except Exception as exc:  # noqa: BLE001 - diffusers raises many types here
+                errors.append(f"{cls_name}: {exc}")
+        raise BackendUnavailable(
+            f"Не удалось загрузить чекпоинт {checkpoint.name}: поддерживаются SDXL и SD 1.5. "
+            + "; ".join(errors)[:500]
+        )
 
+    def _apply_loras(self, pipe, loras: tuple[tuple[Path, float], ...]) -> None:
+        if not loras:
+            return
+        names, weights = [], []
+        for i, (path, weight) in enumerate(loras):
+            name = f"lora{i}"
+            try:
+                pipe.load_lora_weights(str(path.parent), weight_name=path.name, adapter_name=name)
+            except Exception as exc:  # noqa: BLE001
+                pipe.unload_lora_weights()
+                raise BackendUnavailable(
+                    f"LoRA {path.name} не подходит к выбранной модели (нужна та же база: SDXL или SD 1.5)."
+                ) from exc
+            names.append(name)
+            weights.append(weight)
+        pipe.set_adapters(names, adapter_weights=weights)
+
+    def generate(self, params: GenerateParams) -> tuple[Image.Image, int]:
+        torch, _ = self._imports()
         seed = params.seed if params.seed is not None else int(np.random.default_rng().integers(0, 2**31 - 1))
         with self._lock:
-            pipe = self._load()
-            gen_device = "cpu" if self.device == "mps" else self.device
-            g = torch.Generator(device=gen_device).manual_seed(seed)
-            result = pipe(
-                prompt=params.prompt,
-                negative_prompt=params.negative_prompt or None,
-                width=params.width,
-                height=params.height,
-                num_inference_steps=params.steps,
-                guidance_scale=params.guidance,
-                generator=g,
-            )
+            pipe = self._load(params.checkpoint)
+            self._apply_loras(pipe, params.loras)
+            try:
+                gen_device = "cpu" if self.device == "mps" else self.device
+                g = torch.Generator(device=gen_device).manual_seed(seed)
+                result = pipe(
+                    prompt=params.prompt,
+                    negative_prompt=params.negative_prompt or None,
+                    width=params.width,
+                    height=params.height,
+                    num_inference_steps=params.steps,
+                    guidance_scale=params.guidance,
+                    generator=g,
+                )
+            finally:
+                if params.loras:
+                    pipe.unload_lora_weights()
         return result.images[0], seed
 
 
@@ -199,7 +254,11 @@ class MockGenerator:
         row = (c1 * (1 - t) + c2 * t).astype(np.uint8)
         arr = np.repeat(row, params.height, axis=0)
         img = Image.fromarray(arr, "RGB")
-        ImageDraw.Draw(img).text((16, 16), params.prompt[:80], fill=(255, 255, 255))
+        draw = ImageDraw.Draw(img)
+        draw.text((16, 16), params.prompt[:80], fill=(255, 255, 255))
+        model = params.checkpoint.name if params.checkpoint else "default"
+        loras = ", ".join(f"{p.name}:{w:g}" for p, w in params.loras)
+        draw.text((16, 36), f"model: {model}" + (f" | lora: {loras}" if loras else ""), fill=(255, 255, 255))
         return img, seed
 
 

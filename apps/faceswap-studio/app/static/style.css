@@ -49,7 +49,7 @@ main { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap:
 .tab-pane { display: none; flex-direction: column; gap: 12px; }
 .tab-pane.active { display: flex; }
 label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
-input, textarea {
+input, textarea, select {
   font: inherit; color: var(--text); background: var(--bg);
   border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; width: 100%;
 }
@@ -84,3 +84,12 @@ figcaption a { color: var(--accent); }
 .spinner[hidden] { display: none; }
 @keyframes spin { to { transform: rotate(360deg); } }
 footer { color: var(--muted); font-size: 12px; padding-top: 16px; padding-bottom: 24px; }
+
+.model-block { display: flex; flex-direction: column; gap: 8px; padding: 10px; border: 1px solid var(--border); border-radius: 8px; }
+.loras { display: flex; flex-direction: column; gap: 6px; }
+.lora-row { display: grid; grid-template-columns: minmax(0, 1fr) 84px 36px; gap: 6px; }
+button.secondary {
+  background: transparent; color: var(--text); border: 1px solid var(--border);
+  border-radius: 8px; padding: 6px 10px; font: inherit; cursor: pointer; align-self: flex-start;
+}
+button.secondary:disabled { opacity: .5; cursor: not-allowed; }
