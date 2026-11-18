@@ -63,9 +63,19 @@
 
 - **«ЕИС отклонила запрос (403)».** Сайт закупок часто не пускает зарубежные адреса. Отключите
   VPN.
-- **«Не удалось проверить сертификат zakupki.gov.ru».** Скачайте сертификат
-  «Russian Trusted Root CA» с Госуслуг (раздел «Сертификаты Минцифры»), сохраните `.pem` или
-  `.crt` и укажите путь к нему в **Настройки → Закупки**.
+- **«Не удалось проверить сертификат zakupki.gov.ru».** Сайт ЕИС использует сертификат Минцифры,
+  которого нет в Python. Скачайте два сертификата с Госуслуг (страница gosuslugi.ru/crt) в папку
+  `%APPDATA%\Jarvis\certs`:
+
+  ```powershell
+  $d = "$env:APPDATA\Jarvis\certs"; New-Item -ItemType Directory -Force $d | Out-Null
+  Invoke-WebRequest "https://gu-st.ru/content/Other/doc/russian_trusted_root_ca.cer" -OutFile "$d\russian_trusted_root_ca.cer"
+  Invoke-WebRequest "https://gu-st.ru/content/Other/doc/russian_trusted_sub_ca.cer" -OutFile "$d\russian_trusted_sub_ca.cer"
+  ```
+
+  Джарвис доверяет этим сертификатам только при запросах к ЕИС, настройки Windows не меняются.
+  Можно также указать путь к своему файлу или папке в **Настройки → Закупки**. Если сертификат
+  Минцифры уже установлен в Windows (например, Яндекс Браузером), всё работает и без этого.
 - **Таблица закупок пустая, хотя на сайте закупки есть.** Возможно, ЕИС изменила вёрстку
   страницы. Разбор находится в `jarvis_app/procurement.py`, функции `parse_results` и
   `_parse_entry`.

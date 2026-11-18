@@ -20,6 +20,8 @@ from urllib.parse import urlencode, urljoin
 import requests
 from bs4 import BeautifulSoup, Tag
 
+from .certs import configure_session
+
 BASE_URL = "https://zakupki.gov.ru"
 SEARCH_PATH = "/epz/order/extendedsearch/results.html"
 USER_AGENT = (
@@ -220,8 +222,8 @@ class ProcurementClient:
                 "Accept-Language": "ru-RU,ru;q=0.9",
             }
         )
-        # Путь к сертификату «Russian Trusted Root CA», если без него не работает HTTPS.
-        self._verify: bool | str = ca_bundle if ca_bundle and Path(ca_bundle).exists() else True
+        # Сертификат Минцифры: из папки certs / настроек, иначе — хранилище Windows (см. certs.py).
+        self._verify: bool | str = configure_session(self._session, ca_bundle) if session is None else True
         self._last_request = 0.0
         self._lock = threading.Lock()
 
@@ -234,8 +236,9 @@ class ProcurementClient:
                 response = self._session.get(url, timeout=REQUEST_TIMEOUT, verify=self._verify)
             except requests.exceptions.SSLError as exc:
                 raise ProcurementError(
-                    "Не удалось проверить сертификат zakupki.gov.ru. Установите сертификат "
-                    "«Russian Trusted Root CA» (см. README, раздел «Проблемы»)."
+                    "Не удалось проверить сертификат zakupki.gov.ru. Скачайте сертификаты Минцифры "
+                    "«Russian Trusted Root CA» и «Russian Trusted Sub CA» с Госуслуг и положите их в папку "
+                    "%APPDATA%\\Jarvis\\certs, затем повторите поиск (см. README, раздел «Проблемы»)."
                 ) from exc
             except requests.RequestException as exc:
                 raise ProcurementError(f"Сайт ЕИС недоступен: {exc.__class__.__name__}") from exc
