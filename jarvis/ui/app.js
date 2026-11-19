@@ -97,6 +97,55 @@
   function switchTab(name) {
     document.querySelectorAll('.tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
     document.querySelectorAll('.tab-body').forEach((b) => b.classList.toggle('active', b.id === 'tab-' + name));
+    document.body.dataset.tab = name;
+    updateNeural();
+  }
+
+  // ---------- нейросеть вместо реактора на вкладках «Заявка» и «Аналитика» ----------
+  // Контракт с ui/neural.js: window.JarvisNeural.setVisible(bool) и
+  // window.JarvisNeural.setProgress(value 0..1 или null — неизвестно, { state: 'idle'|'working'|'done'|'error', label }).
+  const neural = { analyst: { value: 0, state: 'idle', label: '' } };
+
+  function tenderProgress() {
+    const steps = (tender && tender.state && tender.state.steps) || {};
+    const keys = ['files', 'analysis', 'match', 'estimate', 'docs'];
+    let sum = 0;
+    let running = '';
+    let error = '';
+    keys.forEach((k) => {
+      const st = (steps[k] || {}).status;
+      if (st === 'done' || st === 'skipped') sum += 1;
+      else if (st === 'running') {
+        sum += 0.5;
+        running = k;
+      } else if (st === 'error') error = k;
+    });
+    const titles = { files: 'Документы', analysis: 'Разбор ТЗ', match: 'Подбор', estimate: 'Стоимость', docs: 'Документы заявки' };
+    const value = sum / keys.length;
+    if (running) return { value, state: 'working', label: titles[running] };
+    if (error) return { value, state: 'error', label: titles[error] };
+    if (value >= 1) return { value: 1, state: 'done', label: 'Готово' };
+    return { value, state: 'idle', label: tender && tender.state && tender.state.purchase ? 'Ожидание' : 'Нет закупки' };
+  }
+
+  function updateNeural() {
+    const api2 = window.JarvisNeural;
+    const tab = document.body.dataset.tab || 'chat';
+    const on = tab === 'tender' || tab === 'analyst';
+    if (!api2) return;
+    api2.setVisible(on);
+    if (!on) return;
+    const p = tab === 'tender' ? tenderProgress() : neural.analyst;
+    api2.setProgress(p.value, { state: p.state, label: p.label });
+  }
+
+  function analystProgressFrom(text, busy, isError) {
+    const m = /(\d+)\s+из\s+(\d+)/.exec(text || '');
+    const a = neural.analyst;
+    if (isError) Object.assign(a, { state: 'error', label: 'Ошибка' });
+    else if (!busy) Object.assign(a, { value: /^Готово/.test(text || '') ? 1 : a.value, state: /^Готово/.test(text || '') ? 'done' : 'idle', label: /^Готово/.test(text || '') ? 'Готово' : '' });
+    else if (m) Object.assign(a, { value: Math.min(0.98, Number(m[1]) / Math.max(1, Number(m[2]))), state: 'working', label: text.split('…')[0] });
+    else Object.assign(a, { value: a.state === 'working' ? a.value : 0.05, state: 'working', label: (text || '').split('…')[0] });
   }
 
   // ---------- диалог ----------
@@ -948,6 +997,7 @@
         case 'tender_state':
           renderTender(p.state);
           setTenderStatus(p.status, !!p.busy, false);
+          updateNeural();
           break;
         case 'tender_status':
           setTenderStatus(p.text, !!p.busy, !!p.error);
@@ -961,6 +1011,8 @@
           s2.classList.toggle('error', !!p.error);
           s2.classList.toggle('busy', !!p.busy);
           $('an-run').disabled = !!p.busy;
+          analystProgressFrom(p.text, !!p.busy, !!p.error);
+          updateNeural();
           break;
         }
         case 'telegram_status':
