@@ -7,7 +7,7 @@ transformers>=4.44
 accelerate>=0.33
 safetensors>=0.4
 peft>=0.12   # LoRA adapters
-insightface>=0.7.3
 onnxruntime-gpu>=1.18 ; platform_system != "Darwin"
 onnxruntime>=1.18 ; platform_system == "Darwin"
 opencv-python-headless>=4.9
+onnx>=1.16   # reads the inswapper emap matrix; face models run on onnxruntime (no insightface)

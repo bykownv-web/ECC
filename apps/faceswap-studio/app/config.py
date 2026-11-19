@@ -33,9 +33,10 @@ class Settings:
     max_loras: int = 5
     # "auto" picks cuda > mps > cpu
     device: str = "auto"
-    # InsightFace swapper weights (must be placed manually, see README)
+    # inswapper_128 weights (must be placed manually, see README). The detector/recognizer
+    # (buffalo_l: det_10g.onnx, w600k_r50.onnx) live in <this file's folder>/buffalo_l
     swap_model_path: Path = APP_ROOT / "models" / "inswapper_128.onnx"
-    # InsightFace detector/landmark pack (downloaded automatically by insightface)
+    # Kept for backwards compatibility; the onnxruntime face engine always uses buffalo_l
     face_analysis_pack: str = "buffalo_l"
     # Optional NSFW image classifier (transformers); empty string disables it
     nsfw_model_id: str = "Falconsai/nsfw_image_detection"

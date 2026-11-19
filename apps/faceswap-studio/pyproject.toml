@@ -1,6 +1,9 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+    "integration: needs real model weights in models/ (skipped when absent)",
+]
 
 [tool.ruff]
 line-length = 110

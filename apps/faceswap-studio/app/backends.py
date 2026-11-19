@@ -11,6 +11,7 @@ from typing import Protocol
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter
 
+from . import face_engine
 from .config import Settings
 
 log = logging.getLogger("faceswap.backends")
@@ -174,39 +175,29 @@ class DiffusersGenerator:
 
 
 class InsightFaceSwapper:
-    """Face swap with InsightFace detection + inswapper_128 ONNX model."""
+    """Face swap with InsightFace models (SCRFD + ArcFace + inswapper_128) on plain onnxruntime.
+
+    Uses app.face_engine, so the ``insightface`` package (no Windows wheels) is not required.
+    """
 
     def __init__(self, settings: Settings, device: str) -> None:
         self.model_path = settings.swap_model_path
-        self.pack = settings.face_analysis_pack
+        self.models_dir = settings.swap_model_path.parent
         self.device = device
-        self._analyser = None
-        self._swapper = None
+        self._engine = None
         self._lock = threading.Lock()
 
-    def _providers(self) -> list[str]:
-        if self.device == "cuda":
-            return ["CUDAExecutionProvider", "CPUExecutionProvider"]
-        return ["CPUExecutionProvider"]
-
     def _load(self):
-        if self._swapper is not None:
-            return self._analyser, self._swapper
+        if self._engine is not None:
+            return self._engine
         if not self.model_path.is_file():
             raise BackendUnavailable(f"Файл модели подмены лица не найден: {self.model_path}. См. README.")
         try:
-            import insightface
-            from insightface.app import FaceAnalysis
+            providers = face_engine.select_providers(self.device)
         except ImportError as exc:
-            raise BackendUnavailable(
-                "Не установлен insightface/onnxruntime. См. requirements-gpu.txt."
-            ) from exc
-        providers = self._providers()
-        analyser = FaceAnalysis(name=self.pack, providers=providers)
-        analyser.prepare(ctx_id=0 if self.device == "cuda" else -1, det_size=(640, 640))
-        swapper = insightface.model_zoo.get_model(str(self.model_path), providers=providers)
-        self._analyser, self._swapper = analyser, swapper
-        return analyser, swapper
+            raise BackendUnavailable("Не установлен onnxruntime. См. requirements-gpu.txt.") from exc
+        self._engine = face_engine.FaceEngine(self.models_dir, providers, swap_model_path=self.model_path)
+        return self._engine
 
     @staticmethod
     def _to_bgr(img: Image.Image) -> np.ndarray:
@@ -216,27 +207,25 @@ class InsightFaceSwapper:
         self, source: Image.Image, target: Image.Image, all_faces: bool = False
     ) -> tuple[Image.Image, int]:
         with self._lock:
-            analyser, swapper = self._load()
-            src = self._to_bgr(source)
-            dst = self._to_bgr(target)
-            src_faces = analyser.get(src)
-            if not src_faces:
-                raise NoFaceFound("На фото-источнике не найдено лицо.")
-            # Use the largest face of the source photo
-            src_face = max(src_faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
-            dst_faces = analyser.get(dst)
-            if not dst_faces:
-                raise NoFaceFound("На целевом изображении не найдено лицо.")
-            if not all_faces:
-                dst_faces = [
-                    max(
-                        dst_faces,
-                        key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]),
-                    )
-                ]
-            out = dst
-            for face in dst_faces:
-                out = swapper.get(out, face, src_face, paste_back=True)
+            engine = self._load()
+            try:
+                src = self._to_bgr(source)
+                dst = self._to_bgr(target)
+                src_faces = engine.detect(src)
+                if not src_faces:
+                    raise NoFaceFound("На фото-источнике не найдено лицо.")
+                # Use the largest face of the source photo
+                src_face = engine.embed(src, max(src_faces, key=lambda f: f.area))
+                dst_faces = engine.detect(dst)
+                if not dst_faces:
+                    raise NoFaceFound("На целевом изображении не найдено лицо.")
+                if not all_faces:
+                    dst_faces = [max(dst_faces, key=lambda f: f.area)]
+                out = dst
+                for face in dst_faces:
+                    out = engine.swap(out, face, src_face)
+            except face_engine.FaceEngineError as exc:
+                raise BackendUnavailable(str(exc)) from exc
         return Image.fromarray(out[:, :, ::-1]), len(dst_faces)
 
 
