@@ -98,6 +98,7 @@ class TelegramBot:
         self.bot_name = ""
         self.last_ok = 0.0
         self.last_error = ""
+        self.started_at = time.time()
 
     # Код привязки хранится в настройках до привязки, чтобы пережить перезапуск Джарвиса.
     @property
@@ -113,18 +114,23 @@ class TelegramBot:
         return re.sub(r"[^0-9A-Z]", "", (code or "").upper())
 
     # ---------- API ----------
-    def _call(self, method: str, token: str | None = None, timeout: float = 20, **params) -> Any:
+    def _call(self, method: str, token: str | None = None, http_timeout: float = 20, **params) -> Any:
         token = token or get_secret(TELEGRAM_KEY)
         if not token:
             raise TelegramError("Не задан токен бота.")
         try:
-            response = self._http.post(TG_API.format(token=token, method=method), json=params, timeout=timeout)
+            response = self._http.post(TG_API.format(token=token, method=method), json=params, timeout=http_timeout)
         except requests.RequestException as exc:
             raise TelegramError(f"Telegram недоступен ({exc.__class__.__name__}).") from exc
         try:
             data = response.json()
         except ValueError as exc:
             raise TelegramError(f"Telegram вернул ошибку {response.status_code}.") from exc
+        if response.status_code == 409 or data.get("error_code") == 409:
+            raise TelegramError(
+                "бот уже опрашивается в другом месте: закройте второе окно Джарвиса "
+                "(или другую программу с этим токеном)."
+            )
         if response.status_code == 401 or data.get("error_code") == 401:
             raise TelegramError("Токен бота не подошёл. Скопируйте его из @BotFather ещё раз.")
         if not data.get("ok"):
@@ -199,29 +205,45 @@ class TelegramBot:
     def _loop(self, stop: threading.Event) -> None:
         offset = None
         backoff = 5
+        try:  # если у бота когда-то был webhook, getUpdates не работает — снимаем его
+            self._call("deleteWebhook", drop_pending_updates=False)
+        except TelegramError:
+            pass
         while not stop.is_set():
             try:
-                params: dict[str, Any] = {"timeout": 25, "allowed_updates": ["message"]}
-                if offset is not None:
-                    params["offset"] = offset
-                updates = self._call("getUpdates", timeout=35, **params) or []
+                offset = self.poll_once(offset)
                 backoff = 5
-                self.last_ok = time.time()
-                self.last_error = ""
-                for update in updates:
-                    offset = update["update_id"] + 1
-                    self.handle_update(update)
             except TelegramError as exc:
                 if str(exc) != self.last_error:
                     self._on_event("telegram_status", {"text": f"Telegram: {exc}", "error": True})
                 self.last_error = str(exc)
                 stop.wait(backoff)
                 backoff = min(backoff * 2, 300)
-            except Exception:
+            except Exception as exc:  # не глотаем молча: показываем в настройках
+                self.last_error = f"{exc.__class__.__name__}: {exc}"
                 stop.wait(backoff)
+                backoff = min(backoff * 2, 300)
+
+    def poll_once(self, offset: int | None) -> int | None:
+        """Один длинный опрос getUpdates: обрабатывает сообщения и возвращает новый offset."""
+        params: dict[str, Any] = {"timeout": 25, "allowed_updates": ["message"]}
+        if offset is not None:
+            params["offset"] = offset
+        updates = self._call("getUpdates", http_timeout=35, **params) or []
+        self.last_ok = time.time()
+        self.last_error = ""
+        for update in updates:
+            offset = update["update_id"] + 1
+            try:
+                self.handle_update(update)
+            except TelegramError as exc:
+                self.last_error = str(exc)
+        return offset
 
     def handle_update(self, update: dict[str, Any]) -> None:
         message = update.get("message") or {}
+        if message.get("date") and message["date"] < self.started_at - 120:
+            return  # старые сообщения, накопившиеся пока Джарвис был выключен, не обрабатываем
         text = (message.get("text") or "").strip()
         chat = message.get("chat") or {}
         chat_id = chat.get("id")

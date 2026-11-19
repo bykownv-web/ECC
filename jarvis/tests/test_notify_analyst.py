@@ -219,3 +219,52 @@ def test_pair_code_survives_restart_and_deep_link_format(tmp_path, secrets):
     # «Старт» по ссылке присылает код без дефиса
     bot2.handle_update(msg(42, "/start " + code.replace("-", "").lower()))
     assert bot2.chat_id() == 42 and bot2.pair_code == ""
+
+
+class PollingTG(FakeTG):
+    """Отдаёт getUpdates как настоящий Telegram и проверяет параметры запроса."""
+
+    def __init__(self, updates):
+        super().__init__()
+        self.updates = updates
+
+    def post(self, url, json=None, timeout=None):
+        method = url.rsplit("/", 1)[1]
+        if method == "getUpdates":
+            assert json["timeout"] == 25 and timeout == 35  # таймаут Telegram и HTTP — разные параметры
+            self.calls.append((method, json))
+            batch, self.updates = self.updates, []
+
+            class R:
+                status_code = 200
+
+                def json(self_inner):
+                    return {"ok": True, "result": batch}
+
+            return R()
+        return super().post(url, json=json, timeout=timeout)
+
+
+def test_poll_once_receives_start_and_pairs(tmp_path, secrets):
+    config = Config(tmp_path / "c.json")
+    secrets[notify.TELEGRAM_KEY] = "123:ABC"
+    config.update({"telegram": {"enabled": True, "bot_name": "test_bot", "pair_code": "J-4965"}})
+    http = PollingTG([dict(msg(7, "/start"), update_id=10), dict(msg(7, "/start J-4965"), update_id=11)])
+    bot = notify.TelegramBot(config, lambda t: "ok", lambda e, p: None, session=http)
+    offset = bot.poll_once(None)
+    assert offset == 12 and bot.chat_id() == 7 and bot.last_ok and bot.last_error == ""
+    replies = [j["text"] for m, j in http.calls if m == "sendMessage"]
+    assert "приватный" in replies[0] and "Привязка выполнена" in replies[1]
+
+
+def test_old_backlog_messages_are_ignored(tmp_path, secrets):
+    import time as _t
+
+    config = Config(tmp_path / "c.json")
+    config.update({"telegram": {"pair_code": "J-1111"}})
+    http = FakeTG()
+    bot = notify.TelegramBot(config, lambda t: "ok", lambda e, p: None, session=http)
+    old = msg(5, "/start J-1111")
+    old["message"]["date"] = int(_t.time()) - 3600
+    bot.handle_update(old)
+    assert bot.chat_id() is None and http.calls == []
