@@ -355,7 +355,28 @@ def test_analyst_save_coerces(make_api):
     a, _, config, _ = make_api()
     a.analyst_save({"enabled": False, "min_score": "75", "top_n": 0, "profile": None})
     s = config.get("analyst")
-    assert (s["min_score"], s["top_n"], s["profile"]) == (75, 3, "")
+    assert (s["min_score"], s["top_n"], s["profile"]) == (75, 1, "")
+    a.analyst_save({"min_score": 0, "top_n": "abc"})
+    s = config.get("analyst")
+    assert (s["min_score"], s["top_n"]) == (0, 3)  # 0 — допустимый порог, мусор — значение по умолчанию
+    a.analyst_save({"min_score": 500, "top_n": 99})
+    s = config.get("analyst")
+    assert (s["min_score"], s["top_n"]) == (100, 10)
+
+
+def test_analyst_run_now_while_running_is_a_toast(make_api, monkeypatch):
+    a, window, _, _ = make_api()
+    a._analyst._lock.acquire()
+    try:
+        a.analyst_run_now()
+    finally:
+        a._analyst._lock.release()
+    assert window.named("toast") == [{"text": "Аналитика уже выполняется."}]
+    assert window.named("analyst_status") == []  # кнопка не разблокируется посреди прогона
+    monkeypatch.setattr(a._analyst, "run", lambda found: (_ for _ in ()).throw(ValueError("Аналитика уже выполняется.")))
+    a.analyst_run_now()
+    assert wait_for(lambda: len(window.named("toast")) == 2)
+    assert all(not p.get("error") for p in window.named("analyst_status"))
 
 
 # ---------- Telegram ----------

@@ -9,7 +9,7 @@ exit /b 1
 
 :build
 "%VPY%" -m pip install -r "%~dp0requirements-dev.txt"
-"%VPY%" -m PyInstaller --noconfirm --windowed --name Jarvis --add-data "ui;ui" --collect-submodules jarvis_app "%~dp0main.py"
+"%VPY%" -m PyInstaller --noconfirm --windowed --name Jarvis --add-data "ui;ui" --add-data "assets;assets" --icon "%~dp0assets\jarvis.ico" --collect-submodules jarvis_app "%~dp0main.py"
 if errorlevel 1 goto fail
 echo.
 echo Done: dist\Jarvis\Jarvis.exe

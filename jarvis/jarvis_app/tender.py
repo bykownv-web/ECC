@@ -51,6 +51,7 @@ class TenderWorkspace:
         self._lock = threading.RLock()
         self._pipeline_lock = threading.Lock()
         self._gen = 0  # номер выбранной закупки: конвейер старой закупки останавливается
+        self._running = False  # идёт конвейер: промежуточные публикации не снимают «занято» в интерфейсе
         self.state: dict[str, Any] = self._empty()
 
     @staticmethod
@@ -102,7 +103,7 @@ class TenderWorkspace:
         return data
 
     def _publish(self, status: str = "", busy: bool = False) -> None:
-        self._emit("tender_state", {"state": self.snapshot(), "status": status, "busy": busy})
+        self._emit("tender_state", {"state": self.snapshot(), "status": status, "busy": busy or self._running})
 
     def _progress(self, text: str) -> None:
         self._emit("tender_status", {"text": text, "busy": True})
@@ -290,7 +291,7 @@ class TenderWorkspace:
                 raise _Cancelled()
             self.state.setdefault("steps", {})[name] = {"status": status, "note": note}
             self._save()
-        self._publish(f"{self.STEP_TITLES[name]}: {note}" if note else "", busy=status == "running")
+        self._publish(f"{self.STEP_TITLES[name]}: {note}" if note else "", busy=status == "running" or self._running)
 
     @staticmethod
     def _error_text(exc: Exception) -> str:
@@ -318,15 +319,21 @@ class TenderWorkspace:
         with self._lock:
             my_gen = self._gen
         with self._pipeline_lock:
+            self._running = True
             try:
-                self._run_steps(my_gen, client, on_report)
+                final = self._run_steps(my_gen, client, on_report)
             except _Cancelled:
                 return
+            finally:
+                self._running = False
+            if final:
+                self._publish(final)  # единственная публикация с busy=False — интерфейс не мигает между шагами
 
-    def _run_steps(self, gen: int, client: ProcurementClient, on_report: Callable[[dict[str, Any]], None] | None) -> None:
+    def _run_steps(self, gen: int, client: ProcurementClient, on_report: Callable[[dict[str, Any]], None] | None) -> str:
+        """Шаги конвейера. Возвращает итоговое сообщение для пользователя (публикует его run_pipeline)."""
         _, state, _ = self._ctx(gen)
         if not state.get("purchase"):
-            return
+            return ""
         failed: list[str] = []
         # 1. документы
         if not state.get("text_chars"):
@@ -337,14 +344,12 @@ class TenderWorkspace:
                 raise
             except Exception as exc:
                 self._step("files", "error", f"{self._error_text(exc)} Добавьте файлы кнопкой «Выбрать файлы» — разбор продолжится сам.", gen)
-                self._publish("Не удалось получить документы — подробности в шаге «Документы».")
-                return
+                return "Не удалось получить документы — подробности в шаге «Документы»."
             _, state, _ = self._ctx(gen)
             if not state.get("text_chars"):
                 self._step("files", "error", f"в файлах нет текста (возможно, сканы): {self._files_note(state)}. "
                                              "Добавьте файлы с текстом кнопкой «Выбрать файлы».", gen)
-                self._publish("В документах нет текста — подробности в шаге «Документы».")
-                return
+                return "В документах нет текста — подробности в шаге «Документы»."
         self._step("files", "done", self._files_note(state), gen)
         # 2. разбор ТЗ
         _, state, _ = self._ctx(gen)
@@ -356,8 +361,7 @@ class TenderWorkspace:
                 raise
             except Exception as exc:
                 self._step("analysis", "error", self._error_text(exc), gen)
-                self._publish("Разбор ТЗ не удался — подробности в шаге «Разбор ТЗ».")
-                return
+                return "Разбор ТЗ не удался — подробности в шаге «Разбор ТЗ»."
         _, state, _ = self._ctx(gen)
         analysis = state.get("analysis") or {}
         positions = analysis.get("positions") or []
@@ -425,9 +429,8 @@ class TenderWorkspace:
             })
         if failed:
             names = ", ".join(f"«{self.STEP_TITLES[k]}»" for k in failed)
-            self._publish(f"Готово с ошибками в шагах {names} — причина указана в шаге.")
-        else:
-            self._publish("Готово: разбор, подбор, расчёт и документы — ниже.")
+            return f"Готово с ошибками в шагах {names} — причина указана в шаге."
+        return "Готово: разбор, подбор, расчёт и документы — ниже."
 
     @staticmethod
     def _estimate_note(totals: dict[str, Any]) -> str:

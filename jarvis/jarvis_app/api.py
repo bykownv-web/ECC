@@ -711,9 +711,11 @@ class JarvisApi:
                         try:
                             self._analyst.run(found)
                         except Exception as exc:  # LLMError, ValueError и прочее — показываем на вкладке «Аналитика»
-                            if not isinstance(exc, ValueError):
-                                _log_error(exc)
-                            self._emit("analyst_status", {"text": str(exc) or exc.__class__.__name__, "busy": False, "error": True})
+                            if not self._analyst_already_running(exc):
+                                if not isinstance(exc, ValueError):
+                                    _log_error(exc)
+                                self._emit("analyst_status", {"text": str(exc) or exc.__class__.__name__,
+                                                              "busy": False, "error": True})
                 except ProcurementError as exc:
                     self._emit("error", {"text": f"Мониторинг: {exc}"})
                 except Exception as exc:  # не молчим: иначе мониторинг «работает», но ничего не находит
@@ -834,7 +836,7 @@ class JarvisApi:
             "enabled": to_bool(values.get("enabled"), False),
             "profile": str(values.get("profile") or "").strip()[:3000],
             "min_score": max(0, min(100, to_int(values.get("min_score"), 60))),
-            "top_n": max(1, min(10, to_int(values.get("top_n"), 3) or 3)),
+            "top_n": max(1, min(10, to_int(values.get("top_n"), 3))),
         }
         self._config.update({"analyst": clean})
         if clean["enabled"]:
@@ -842,14 +844,30 @@ class JarvisApi:
         return {"ok": True, "text": "Автоаналитика включена: Джарвис будет проверять закупки по расписанию мониторинга."
                 if clean["enabled"] else "Настройки аналитики сохранены."}
 
+    def _analyst_running(self) -> bool:
+        lock = getattr(self._analyst, "_lock", None)
+        return bool(lock is not None and lock.locked())
+
+    def _analyst_already_running(self, exc: BaseException) -> bool:
+        """«Аналитика уже выполняется» — не ошибка: показываем тостом и не трогаем кнопку (идёт прогон)."""
+        if isinstance(exc, ValueError) and "уже выполняется" in str(exc):
+            self._emit("toast", {"text": str(exc)})
+            return True
+        return False
+
     def analyst_run_now(self) -> None:
+        if self._analyst_running():
+            self._emit("toast", {"text": "Аналитика уже выполняется."})
+            return
+
         def work() -> None:
             try:
                 self._emit("analyst_status", {"text": "Ищу закупки по вашим тегам…", "busy": True})
                 found, _ = self._toolbox.run_procurement_search()
                 self._analyst.run(found)
             except (ProcurementError, ValueError) as exc:
-                self._emit("analyst_status", {"text": str(exc), "busy": False, "error": True})
+                if not self._analyst_already_running(exc):
+                    self._emit("analyst_status", {"text": str(exc), "busy": False, "error": True})
             except Exception as exc:
                 from .llm import LLMError
 
