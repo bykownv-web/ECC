@@ -180,7 +180,8 @@ def merge_analyses(parts: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def analyze_tz(llm: LLM, text: str, on_progress: Callable[[str], None] | None = None) -> dict[str, Any]:
-    chunks = chunk_text(text)
+    size = getattr(llm, "chunk_chars", CHUNK_CHARS)
+    chunks = chunk_text(text, size=size)
     if not chunks:
         raise ValueError("В документах нет текста для разбора.")
     if len(chunks) > MAX_CHUNKS:
@@ -191,7 +192,7 @@ def analyze_tz(llm: LLM, text: str, on_progress: Callable[[str], None] | None = 
             on_progress(f"Разбираю ТЗ: часть {i} из {len(chunks)}…")
         parts.append(llm.json(ANALYSIS_SYSTEM, f"Фрагмент документации ({i}/{len(chunks)}):\n\n{chunk}", ANALYSIS_SCHEMA))
     result = merge_analyses(parts)
-    result["truncated"] = len(chunk_text(text)) > MAX_CHUNKS
+    result["truncated"] = len(chunk_text(text, size=size)) > MAX_CHUNKS
     return result
 
 

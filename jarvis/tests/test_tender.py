@@ -329,3 +329,57 @@ def test_old_223_card_with_unescaped_ampersand_entity(tmp_path):
     assert page == tab
     assert links == [("ТЗ.docx", "https://zakupki.gov.ru/223/purchase/public/download/download.html?id=777&notice=1")]
     assert any("файлов: 1" in t for t in tried)
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ('{"a": 1, "b": [1, 2,],}', {"a": 1, "b": [1, 2]}),
+        ('Вот ответ:\n```json\n{"summary": «Проекторы»}\n```', {"summary": "Проекторы"}),
+        ('{"summary": "Поставка", "positions": [{"name": "Проектор", "characteristics": [{"name": "Яркость", "requirement": "не менее 50', None),
+        ('{"ok": True, "x": None}', {"ok": True, "x": None}),
+        ('{"text": "кавычка \\" внутри", "n": 2', {"text": 'кавычка " внутри', "n": 2}),
+    ],
+)
+def test_loads_repairs_typical_model_mistakes(raw, expected):
+    data = _loads(raw)
+    if expected is None:  # оборванный ответ: структура закрыта, начало сохранено
+        assert data["summary"] == "Поставка" and data["positions"][0]["name"] == "Проектор"
+    else:
+        assert data == expected
+
+
+def test_schema_example_is_compact():
+    from jarvis_app.llm import schema_example
+    from jarvis_app.tender_ai import ANALYSIS_SCHEMA
+
+    ex = schema_example(ANALYSIS_SCHEMA)
+    assert ex["positions"][0]["characteristics"][0] == {"name": "...", "requirement": "..."}
+    assert ex["restrictions"] == ["..."]
+
+
+def test_gigachat_json_retry_after_broken_answer():
+    from jarvis_app.cloud_llm import GigaChat
+
+    class R:
+        def __init__(self, p, status=200):
+            self._p, self.status_code = p, status
+
+        def json(self):
+            return self._p
+
+    class S:
+        def __init__(self):
+            self.replies = [R({"access_token": "T", "expires_at": 9999999999999}),
+                            R({"choices": [{"message": {"content": "Извините, не могу: {{{ ]]"}}]}),
+                            R({"choices": [{"message": {"content": '{"ok": true}'}}]})]
+            self.bodies = []
+
+        def post(self, url, json=None, data=None, headers=None, timeout=None, verify=None):
+            self.bodies.append(json)
+            return self.replies.pop(0)
+
+    s = S()
+    gc = GigaChat("GigaChat-2", "", session=s, auth_key="K")
+    assert gc.json("SYS", "P", {"type": "object", "properties": {"ok": {"type": "boolean"}}}) == {"ok": True}
+    assert s.bodies[1]["max_tokens"] == 8000 and "исправленный JSON" in s.bodies[2]["messages"][-1]["content"]

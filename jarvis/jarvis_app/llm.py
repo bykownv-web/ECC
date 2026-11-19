@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 import requests
@@ -17,24 +18,89 @@ OLLAMA_CTX = 16384
 
 
 class LLMError(Exception):
-    pass
+    def __init__(self, message: str, raw: str = "") -> None:
+        super().__init__(message)
+        self.raw = raw  # сырой ответ модели — для диагностики
+
+
+def _close_truncated(text: str) -> str:
+    """Дописывает закрывающие скобки и кавычку, если ответ оборвался на середине."""
+    stack: list[str] = []
+    in_str = escape = False
+    for ch in text:
+        if in_str:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch in "{[":
+            stack.append("}" if ch == "{" else "]")
+        elif ch in "}]" and stack:
+            stack.pop()
+    tail = '"' if in_str else ""
+    body = (text + tail).rstrip()
+    body = re.sub(r",\s*$", "", body)          # висящая запятая
+    body = re.sub(r':\s*$', ': ""', body)      # ключ без значения
+    return body + "".join(reversed(stack))
+
+
+def _repair(text: str) -> str:
+    text = text.replace("\u201c", '"').replace("\u201d", '"').replace("\u00ab", '"').replace("\u00bb", '"')
+    text = re.sub(r"//[^\n\"]*\n", "\n", text)          # комментарии
+    text = re.sub(r",\s*([}\]])", r"\1", text)            # запятая перед закрывающей скобкой
+    text = re.sub(r"\bNone\b", "null", text)
+    text = re.sub(r"\bTrue\b", "true", text)
+    text = re.sub(r"\bFalse\b", "false", text)
+    return text
 
 
 def _loads(text: str) -> dict[str, Any]:
-    text = (text or "").strip()
-    if text.startswith("```"):
-        text = text.strip("`")
-        text = text[text.find("{"):]
-    start, end = text.find("{"), text.rfind("}")
-    if start == -1 or end == -1:
-        raise LLMError("ИИ вернул ответ не в формате JSON. Попробуйте ещё раз.")
-    try:
-        data = json.loads(text[start:end + 1])
-    except json.JSONDecodeError as exc:
-        raise LLMError("ИИ вернул повреждённый JSON. Попробуйте ещё раз или выберите модель мощнее.") from exc
-    if not isinstance(data, dict):
-        raise LLMError("ИИ вернул неожиданный ответ.")
-    return data
+    raw = text or ""
+    text = raw.strip()
+    fence = re.search(r"```(?:json)?\s*(.*?)(```|$)", text, re.S)
+    if fence:
+        text = fence.group(1).strip()
+    start = text.find("{")
+    if start == -1:
+        raise LLMError("ИИ вернул ответ не в формате JSON. Попробуйте ещё раз.", raw=raw)
+    text = text[start:]
+    end = text.rfind("}")
+    attempts = []
+    if end != -1:
+        attempts += [text[: end + 1], _repair(text[: end + 1])]
+    attempts += [_close_truncated(_repair(text)), _close_truncated(_repair(text[: end + 1] if end != -1 else text))]
+    for candidate in attempts:
+        try:
+            data = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict):
+            return data
+    raise LLMError("ИИ вернул повреждённый JSON. Попробуйте ещё раз или выберите модель мощнее.", raw=raw)
+
+
+def schema_example(schema: dict[str, Any]) -> Any:
+    """Короткий образец ответа по JSON-схеме — моделям его проще повторить, чем саму схему."""
+    kind = schema.get("type")
+    if kind == "object":
+        return {k: schema_example(v) for k, v in (schema.get("properties") or {}).items()}
+    if kind == "array":
+        return [schema_example(schema.get("items") or {})]
+    if "enum" in schema:
+        return " | ".join(schema["enum"])
+    return {"string": "...", "number": 0, "integer": 0, "boolean": False}.get(kind, "...")
+
+
+def json_hint(schema: dict[str, Any]) -> str:
+    return (
+        "\n\nОтветь ТОЛЬКО одним JSON-объектом такой структуры (значения замени на свои, пустые поля оставь \"\" или []), "
+        "без пояснений и без markdown:\n" + json.dumps(schema_example(schema), ensure_ascii=False)
+    )
 
 
 class LLM:
@@ -44,6 +110,11 @@ class LLM:
 
     def provider(self) -> str:
         return str(self._config.get("ai_provider", "ollama"))
+
+    @property
+    def chunk_chars(self) -> int:
+        """Размер куска ТЗ на один запрос: GigaChat и облачные модели надёжнее на кусках поменьше."""
+        return {"gigachat": 6000, "openai": 9000}.get(self.provider(), 12000)
 
     def json(self, system: str, prompt: str, schema: dict[str, Any]) -> dict[str, Any]:
         provider = self.provider()

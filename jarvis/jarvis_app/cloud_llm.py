@@ -200,17 +200,33 @@ class OpenAICompatChat(_ToolChatMixin):
         return TOOL_DEFINITIONS
 
     def json(self, system: str, prompt: str, schema: dict[str, Any]) -> dict[str, Any]:
-        from .llm import _loads
+        from .llm import json_hint
 
-        hint = "\n\nОтветь ТОЛЬКО одним JSON-объектом по этой схеме, без пояснений:\n" + json.dumps(schema, ensure_ascii=False)
-        body = {"messages": [{"role": "system", "content": system + hint}, {"role": "user", "content": prompt}], "temperature": 0.1}
+        messages = [{"role": "system", "content": system + json_hint(schema)}, {"role": "user", "content": prompt}]
+        body = {"messages": messages, "temperature": 0.1, "max_tokens": 8000}
         try:
             msg = self._post({**body, "response_format": {"type": "json_object"}})
         except CloudError as exc:
             if "400" not in str(exc) and "422" not in str(exc):
                 raise
             msg = self._post(body)  # сервис не поддерживает response_format
-        return _loads(msg.get("content") or "")
+        return _json_with_retry(self._post, messages, msg.get("content") or "", {"temperature": 0.1, "max_tokens": 8000})
+
+
+def _json_with_retry(post: Callable[[dict[str, Any]], dict[str, Any]], messages: list[dict[str, Any]], content: str,
+                     extra: dict[str, Any]) -> dict[str, Any]:
+    """Разбираем JSON; если не вышло — один раз просим модель прислать исправленный JSON целиком."""
+    from .llm import LLMError, _loads
+
+    try:
+        return _loads(content)
+    except LLMError:
+        fix = messages + [
+            {"role": "assistant", "content": content[:6000]},
+            {"role": "user", "content": "Это не корректный JSON (возможно, ответ оборвался). Пришли исправленный JSON целиком, "
+                                        "покороче, без пояснений и markdown."},
+        ]
+        return _loads(post({"messages": fix, **extra}).get("content") or "")
 
 
 class GigaChat(_ToolChatMixin):
@@ -309,8 +325,9 @@ class GigaChat(_ToolChatMixin):
                 raise
 
     def json(self, system: str, prompt: str, schema: dict[str, Any]) -> dict[str, Any]:
-        from .llm import _loads
+        from .llm import json_hint
 
-        hint = "\n\nОтветь ТОЛЬКО одним JSON-объектом по этой схеме, без пояснений и без markdown:\n" + json.dumps(schema, ensure_ascii=False)
-        msg = self._post({"messages": [{"role": "system", "content": system + hint}, {"role": "user", "content": prompt}], "temperature": 0.1})
-        return _loads(msg.get("content") or "")
+        messages = [{"role": "system", "content": system + json_hint(schema)}, {"role": "user", "content": prompt}]
+        extra = {"temperature": 0.1, "max_tokens": 8000}
+        msg = self._post({"messages": messages, **extra})
+        return _json_with_retry(self._post, messages, msg.get("content") or "", extra)

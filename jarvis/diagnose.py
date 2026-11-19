@@ -159,6 +159,10 @@ def main() -> int:
             (out / "estimate.json").write_text(json.dumps({"estimate": estimate, "totals": totals}, ensure_ascii=False, indent=1), encoding="utf-8")
         except Exception as exc:
             log.fail(f"ИИ: {exc}")
+            raw = getattr(exc, "raw", "")
+            if raw:
+                (out / "llm_raw_answer.txt").write_text(raw, encoding="utf-8")
+                log(f"       сырой ответ модели ({len(raw)} симв.), начало и конец:\n{raw[:800]}\n…\n{raw[-400:]}")
             log(traceback.format_exc())
 
     log.step("Итог")
