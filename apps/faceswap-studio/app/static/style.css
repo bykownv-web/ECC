@@ -83,6 +83,16 @@ figcaption a { color: var(--accent); }
 }
 .spinner[hidden] { display: none; }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+.progress { display: flex; flex-direction: column; gap: 8px; margin: auto 0; padding: 8px 0; }
+.progress[hidden] { display: none; }
+.progress .spinner { width: 28px; height: 28px; margin: 0 auto 4px; }
+.progress-head { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; }
+#progress-stage { color: var(--text); }
+#progress-percent { color: var(--muted); font-variant-numeric: tabular-nums; }
+.progress-track { height: 8px; border-radius: 999px; background: var(--bg); border: 1px solid var(--border); overflow: hidden; }
+.progress-bar { height: 100%; width: 0; background: var(--accent); border-radius: inherit; transition: width .3s ease; }
+.progress button.secondary { align-self: center; }
 footer { color: var(--muted); font-size: 12px; padding-top: 16px; padding-bottom: 24px; }
 
 .model-block { display: flex; flex-direction: column; gap: 8px; padding: 10px; border: 1px solid var(--border); border-radius: 8px; }

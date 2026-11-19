@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import inspect
 import io
 import json
 import logging
 import re
 import uuid
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, ImageOps, UnidentifiedImageError
@@ -26,6 +29,7 @@ from .backends import (
     build_backends,
 )
 from .config import Settings
+from .jobs import ERROR, Job, JobContext, JobError, JobManager, ProgressFn
 from .registry import list_models, resolve_model
 from .safety import (
     ContentBlocked,
@@ -38,6 +42,10 @@ from .safety import (
 log = logging.getLogger("faceswap")
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 IMAGE_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+JOB_ID_RE = IMAGE_ID_RE
+STAGE_SWAP = "Подмена лица…"
+STAGE_SAVE = "Проверка и сохранение…"
+INTERNAL_ERROR = "Внутренняя ошибка сервера. Подробности в журнале сервера."
 CONSENT_ERROR = (
     "Подтвердите, что у вас есть согласие человека, чьё лицо используется, или что это ваше собственное лицо."
 )
@@ -68,6 +76,41 @@ class ImageResult(BaseModel):
     faces_swapped: int | None = None
 
 
+class JobAccepted(BaseModel):
+    job_id: str
+
+
+@dataclass(frozen=True)
+class JobSpec:
+    """Validated input, ready to run: `fn(ctx)` returns an ImageResult dict."""
+
+    kind: str
+    fn: Callable[[JobContext], dict]
+
+
+def map_job_error(exc: Exception) -> JobError:
+    """Same status codes as the exception handlers of the blocking endpoints."""
+    if isinstance(exc, (ContentBlocked, NoFaceFound)):
+        return JobError(422, str(exc))
+    if isinstance(exc, BackendUnavailable):
+        return JobError(503, str(exc))
+    if isinstance(exc, HTTPException):
+        return JobError(exc.status_code, str(exc.detail))
+    log.error("Job failed", exc_info=exc)
+    return JobError(500, INTERNAL_ERROR)
+
+
+def _accepts_progress(fn: Callable) -> bool:
+    """Generators written against the old protocol take only `params`."""
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return False
+    return any(
+        p.name == "progress" or p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+    )
+
+
 def create_app(settings: Settings | None = None, backends: Backends | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
     backends = backends or build_backends(settings)
@@ -81,6 +124,8 @@ def create_app(settings: Settings | None = None, backends: Backends | None = Non
     app = FastAPI(title="FaceSwap Studio", version=__version__)
     app.state.settings = settings
     app.state.backends = backends
+    jobs = JobManager(error_mapper=map_job_error)
+    app.state.jobs = jobs
 
     # ------------------------------------------------------------------ helpers
 
@@ -124,7 +169,8 @@ def create_app(settings: Settings | None = None, backends: Backends | None = Non
         except (ValueError, ValidationError) as exc:
             raise HTTPException(400, "Поле loras: ожидается JSON-список {name, weight}.") from exc
 
-    def run_generate(req: GenerateRequest) -> tuple[Image.Image, int]:
+    def build_params(req: GenerateRequest) -> GenerateParams:
+        """All synchronous validation of a generation request (prompt policy, model, LoRA)."""
         check_prompt(req.prompt, settings.extra_blocked_terms)
         checkpoint = None
         if req.model:
@@ -140,7 +186,7 @@ def create_app(settings: Settings | None = None, backends: Backends | None = Non
                 raise HTTPException(400, f"LoRA не найдена: {spec.name}")
             loras.append((path, spec.weight))
         steps = min(req.steps or settings.default_steps, settings.max_steps)
-        params = GenerateParams(
+        return GenerateParams(
             prompt=req.prompt,
             negative_prompt=req.negative_prompt,
             width=snap(req.width),
@@ -151,7 +197,104 @@ def create_app(settings: Settings | None = None, backends: Backends | None = Non
             checkpoint=checkpoint,
             loras=tuple(loras),
         )
-        return backends.generator.generate(params)
+
+    def run_generator(params: GenerateParams, progress: ProgressFn) -> tuple[Image.Image, int]:
+        generate = backends.generator.generate
+        if _accepts_progress(generate):
+            return generate(params, progress=progress)
+        return generate(params)
+
+    def result(image_id: str, **extra) -> dict:
+        return ImageResult(id=image_id, url=f"/api/images/{image_id}", **extra).model_dump()
+
+    def generate_spec(req: GenerateRequest) -> JobSpec:
+        params = build_params(req)
+
+        def work(ctx: JobContext) -> dict:
+            img, seed = run_generator(params, ctx.scaled(0.0, 0.95))
+            ctx.report(STAGE_SAVE, 0.96)
+            image_id = save(img, "generate", params.prompt)
+            return result(image_id, seed=seed)
+
+        return JobSpec("generate", work)
+
+    async def swap_spec(
+        source: Annotated[UploadFile, File(description="Фото с лицом-источником")],
+        target: Annotated[UploadFile, File(description="Изображение, куда вставить лицо")],
+        consent: Annotated[bool, Form()] = False,
+        all_faces: Annotated[bool, Form()] = False,
+    ) -> JobSpec:
+        if not consent:
+            raise HTTPException(400, CONSENT_ERROR)
+        src = await read_image(source, "Источник")
+        dst = await read_image(target, "Цель")
+
+        def work(ctx: JobContext) -> dict:
+            ctx.report(STAGE_SWAP, 0.1)
+            img, count = backends.swapper.swap(src, dst, all_faces)
+            ctx.report(STAGE_SAVE, 0.9)
+            image_id = save(img, "swap")
+            return result(image_id, faces_swapped=count)
+
+        return JobSpec("swap", work)
+
+    async def generate_swap_spec(
+        source: Annotated[UploadFile, File(description="Фото с лицом-источником")],
+        prompt: Annotated[str, Form(min_length=1, max_length=1000)],
+        consent: Annotated[bool, Form()] = False,
+        negative_prompt: Annotated[str, Form(max_length=1000)] = "",
+        width: Annotated[int, Form(ge=256, le=2048)] = 1024,
+        height: Annotated[int, Form(ge=256, le=2048)] = 1024,
+        steps: Annotated[int | None, Form(ge=1)] = None,
+        guidance: Annotated[float, Form(ge=0.0, le=20.0)] = 7.0,
+        seed: Annotated[int | None, Form(ge=0, le=2**32 - 1)] = None,
+        model: Annotated[str | None, Form(max_length=255)] = None,
+        loras: Annotated[
+            str, Form(max_length=4000, description='JSON: [{"name": ..., "weight": ...}]')
+        ] = "[]",
+    ) -> JobSpec:
+        if not consent:
+            raise HTTPException(400, CONSENT_ERROR)
+        src = await read_image(source, "Источник")
+        req = GenerateRequest(
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            width=width,
+            height=height,
+            steps=steps,
+            guidance=guidance,
+            seed=seed,
+            model=model or None,
+            loras=parse_loras(loras),
+        )
+        params = build_params(req)
+
+        def work(ctx: JobContext) -> dict:
+            generated, used_seed = run_generator(params, ctx.scaled(0.0, 0.8))
+            ctx.report(STAGE_SWAP, 0.85)
+            img, count = backends.swapper.swap(src, generated, False)
+            ctx.report(STAGE_SAVE, 0.95)
+            image_id = save(img, "generate-swap", params.prompt)
+            return result(image_id, seed=used_seed, faces_swapped=count)
+
+        return JobSpec("generate-swap", work)
+
+    def run_blocking(spec: JobSpec) -> ImageResult:
+        """Blocking endpoints share the job queue, so GPU work stays serialized for both APIs."""
+        job = jobs.submit(spec.kind, spec.fn)
+        job.wait()
+        if job.status == ERROR and job.error is not None:
+            raise HTTPException(job.error.code, job.error.detail)
+        return ImageResult.model_validate(job.result)
+
+    def accepted(spec: JobSpec) -> JobAccepted:
+        return JobAccepted(job_id=jobs.submit(spec.kind, spec.fn).id)
+
+    def find_job(job_id: str) -> Job:
+        job = jobs.get(job_id) if JOB_ID_RE.fullmatch(job_id) else None
+        if job is None:
+            raise HTTPException(404, "Задача не найдена.")
+        return job
 
     # ------------------------------------------------------------------ errors
 
@@ -179,6 +322,10 @@ def create_app(settings: Settings | None = None, backends: Backends | None = Non
             "model": settings.model_id if backends.name != "mock" else "mock",
             "swap_model_present": backends.name == "mock" or settings.swap_model_path.is_file(),
             "watermark": settings.watermark,
+            "lowvram": settings.lowvram,
+            "lowvram_active": getattr(backends.generator, "lowvram_active", None),
+            # Architecture of the loaded pipeline ("sdxl" / "sd15"), None until a model is loaded
+            "architecture": getattr(backends.generator, "architecture", None),
         }
 
     @app.get("/api/models")
@@ -189,61 +336,45 @@ def create_app(settings: Settings | None = None, backends: Backends | None = Non
             "loras": list_models(settings.loras_dir),
         }
 
+    # FastAPI dependencies: parse + validate multipart input synchronously
+    swap_inputs = Depends(swap_spec)
+    generate_swap_inputs = Depends(generate_swap_spec)
+
+    # blocking API: waits for the result
+
     @app.post("/api/generate", response_model=ImageResult)
     def generate(req: GenerateRequest) -> ImageResult:
-        img, seed = run_generate(req)
-        image_id = save(img, "generate", req.prompt)
-        return ImageResult(id=image_id, url=f"/api/images/{image_id}", seed=seed)
+        return run_blocking(generate_spec(req))
 
     @app.post("/api/swap", response_model=ImageResult)
-    async def swap(
-        source: Annotated[UploadFile, File(description="Фото с лицом-источником")],
-        target: Annotated[UploadFile, File(description="Изображение, куда вставить лицо")],
-        consent: Annotated[bool, Form()] = False,
-        all_faces: Annotated[bool, Form()] = False,
-    ) -> ImageResult:
-        if not consent:
-            raise HTTPException(400, CONSENT_ERROR)
-        src = await read_image(source, "Источник")
-        dst = await read_image(target, "Цель")
-        img, count = await run_in_threadpool(backends.swapper.swap, src, dst, all_faces)
-        image_id = await run_in_threadpool(save, img, "swap")
-        return ImageResult(id=image_id, url=f"/api/images/{image_id}", faces_swapped=count)
+    async def swap(spec: JobSpec = swap_inputs) -> ImageResult:
+        return await run_in_threadpool(run_blocking, spec)
 
     @app.post("/api/generate-swap", response_model=ImageResult)
-    async def generate_swap(
-        source: Annotated[UploadFile, File(description="Фото с лицом-источником")],
-        prompt: Annotated[str, Form(min_length=1, max_length=1000)],
-        consent: Annotated[bool, Form()] = False,
-        negative_prompt: Annotated[str, Form(max_length=1000)] = "",
-        width: Annotated[int, Form(ge=256, le=2048)] = 1024,
-        height: Annotated[int, Form(ge=256, le=2048)] = 1024,
-        steps: Annotated[int | None, Form(ge=1)] = None,
-        guidance: Annotated[float, Form(ge=0.0, le=20.0)] = 7.0,
-        seed: Annotated[int | None, Form(ge=0, le=2**32 - 1)] = None,
-        model: Annotated[str | None, Form(max_length=255)] = None,
-        loras: Annotated[
-            str, Form(max_length=4000, description='JSON: [{"name": ..., "weight": ...}]')
-        ] = "[]",
-    ) -> ImageResult:
-        if not consent:
-            raise HTTPException(400, CONSENT_ERROR)
-        src = await read_image(source, "Источник")
-        req = GenerateRequest(
-            prompt=prompt,
-            negative_prompt=negative_prompt,
-            width=width,
-            height=height,
-            steps=steps,
-            guidance=guidance,
-            seed=seed,
-            model=model or None,
-            loras=parse_loras(loras),
-        )
-        generated, used_seed = await run_in_threadpool(run_generate, req)
-        img, count = await run_in_threadpool(backends.swapper.swap, src, generated, False)
-        image_id = await run_in_threadpool(save, img, "generate-swap", prompt)
-        return ImageResult(id=image_id, url=f"/api/images/{image_id}", seed=used_seed, faces_swapped=count)
+    async def generate_swap(spec: JobSpec = generate_swap_inputs) -> ImageResult:
+        return await run_in_threadpool(run_blocking, spec)
+
+    # background jobs: same inputs and validation, then poll GET /api/jobs/{id}
+
+    @app.post("/api/jobs/generate", response_model=JobAccepted, status_code=202)
+    def job_generate(req: GenerateRequest) -> JobAccepted:
+        return accepted(generate_spec(req))
+
+    @app.post("/api/jobs/swap", response_model=JobAccepted, status_code=202)
+    async def job_swap(spec: JobSpec = swap_inputs) -> JobAccepted:
+        return accepted(spec)
+
+    @app.post("/api/jobs/generate-swap", response_model=JobAccepted, status_code=202)
+    async def job_generate_swap(spec: JobSpec = generate_swap_inputs) -> JobAccepted:
+        return accepted(spec)
+
+    @app.get("/api/jobs/{job_id}")
+    def job_status(job_id: str) -> dict:
+        return jobs.snapshot(find_job(job_id))
+
+    @app.post("/api/jobs/{job_id}/cancel")
+    def job_cancel(job_id: str) -> dict:
+        return jobs.snapshot(jobs.cancel(find_job(job_id).id))
 
     @app.get("/api/images/{image_id}")
     def get_image(image_id: str) -> FileResponse:

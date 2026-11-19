@@ -100,7 +100,18 @@
 
     <section class="panel result">
       <div id="result-empty" class="empty">Здесь появится результат</div>
-      <div id="spinner" class="spinner" hidden></div>
+      <div id="progress" class="progress" hidden aria-live="polite">
+        <div class="spinner"></div>
+        <div class="progress-head">
+          <span id="progress-stage">В очереди</span>
+          <span id="progress-percent">0%</span>
+        </div>
+        <div id="progress-track" class="progress-track" role="progressbar"
+          aria-label="Ход выполнения" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+          <div id="progress-bar" class="progress-bar"></div>
+        </div>
+        <button type="button" id="progress-cancel" class="secondary">Отменить</button>
+      </div>
       <p id="error" class="error" hidden></p>
       <figure id="result" hidden>
         <img id="result-img" alt="Результат">

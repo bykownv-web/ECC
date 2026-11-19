@@ -16,9 +16,23 @@ def _bool(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    return float(raw) if raw else default
+
+
 def _int(name: str, default: int) -> int:
     raw = os.environ.get(name)
     return int(raw) if raw else default
+
+
+def _lowvram(raw: str) -> str:
+    value = raw.strip().lower()
+    aliases = {"1": "on", "true": "on", "yes": "on", "0": "off", "false": "off", "no": "off"}
+    value = aliases.get(value, value)
+    if value not in {"auto", "on", "off"}:
+        raise ValueError(f"FSS_LOWVRAM must be auto, on or off, got {raw!r}")
+    return value
 
 
 @dataclass(frozen=True)
@@ -33,6 +47,8 @@ class Settings:
     max_loras: int = 5
     # "auto" picks cuda > mps > cpu
     device: str = "auto"
+    # Low-VRAM mode (CPU offload + VAE slicing/tiling): "auto" = on when the GPU has < 10 GB
+    lowvram: str = "auto"
     # inswapper_128 weights (must be placed manually, see README). The detector/recognizer
     # (buffalo_l: det_10g.onnx, w600k_r50.onnx) live in <this file's folder>/buffalo_l
     swap_model_path: Path = APP_ROOT / "models" / "inswapper_128.onnx"
@@ -48,6 +64,8 @@ class Settings:
     default_steps: int = 30
     max_steps: int = 80
     extra_blocked_terms: tuple[str, ...] = field(default_factory=tuple)
+    # Mock backend only: seconds per fake generation step (to demo the progress bar)
+    mock_delay: float = 0.0
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -56,6 +74,7 @@ class Settings:
             backend=os.environ.get("FSS_BACKEND", cls.backend).strip().lower(),
             model_id=os.environ.get("FSS_MODEL_ID", cls.model_id),
             device=os.environ.get("FSS_DEVICE", cls.device),
+            lowvram=_lowvram(os.environ.get("FSS_LOWVRAM", cls.lowvram)),
             checkpoints_dir=Path(os.environ.get("FSS_CHECKPOINTS_DIR", str(cls.checkpoints_dir))),
             loras_dir=Path(os.environ.get("FSS_LORAS_DIR", str(cls.loras_dir))),
             swap_model_path=Path(os.environ.get("FSS_SWAP_MODEL_PATH", str(cls.swap_model_path))),
@@ -69,4 +88,5 @@ class Settings:
             default_steps=_int("FSS_DEFAULT_STEPS", cls.default_steps),
             max_steps=_int("FSS_MAX_STEPS", cls.max_steps),
             extra_blocked_terms=tuple(t.strip().lower() for t in extra.split(",") if t.strip()),
+            mock_delay=_float("FSS_MOCK_DELAY", cls.mock_delay),
         )
