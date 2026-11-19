@@ -62,10 +62,12 @@ def open_app(name: str, apps: dict[str, str]) -> str:
     if key in KNOWN_SITES:
         return open_url(KNOWN_SITES[key])
 
+    apps = {str(k).strip().lower(): str(v) for k, v in (apps or {}).items() if str(k).strip() and v}
     target = apps.get(key)
     if target is None:
         for alias, command in apps.items():
-            if alias in key or key in alias:
+            # «открой ворд документ» → «ворд»; совпадение по куску короче 3 букв не считаем
+            if (len(alias) >= 3 and alias in key) or (len(key) >= 3 and key in alias):
                 target = command
                 break
     if target is None:
@@ -80,7 +82,7 @@ def open_app(name: str, apps: dict[str, str]) -> str:
     _require_windows()
     try:
         os.startfile(target)  # type: ignore[attr-defined]
-    except OSError as exc:
+    except (OSError, AttributeError) as exc:
         raise PCError(f"Не удалось запустить «{name}»: {exc.strerror or exc}") from exc
     return f"Открываю {name}."
 
@@ -101,8 +103,11 @@ def web_search(query: str) -> str:
 
 
 def volume(action: str, steps: int = 5) -> str:
-    action = (action or "").lower()
-    steps = min(max(int(steps or 1), 1), 50)
+    action = (action or "").strip().lower()
+    try:
+        steps = min(max(int(steps or 1), 1), 50)
+    except (TypeError, ValueError):
+        steps = 5
     if action == "up":
         _press_key(VK_VOLUME_UP, steps)
         return "Сделал громче."
@@ -117,6 +122,7 @@ def volume(action: str, steps: int = 5) -> str:
 
 def media(action: str) -> str:
     codes = {"play_pause": VK_MEDIA_PLAY_PAUSE, "next": VK_MEDIA_NEXT, "prev": VK_MEDIA_PREV}
+    action = (action or "").strip().lower()
     if action not in codes:
         raise PCError("Неизвестная медиа-команда.")
     _press_key(codes[action])
@@ -132,14 +138,21 @@ def lock_screen() -> str:
 def power(action: str, delay_sec: int = 60) -> str:
     """Выключение или перезагрузка с задержкой — её можно отменить командой cancel."""
     _require_windows()
-    delay_sec = min(max(int(delay_sec), 30), 3600)
+    try:
+        delay_sec = min(max(int(delay_sec), 30), 3600)
+    except (TypeError, ValueError):
+        delay_sec = 60
+    action = (action or "").strip().lower()
     flags = {"shutdown": "/s", "restart": "/r"}
-    if action == "cancel":
-        subprocess.run(["shutdown", "/a"], check=False, creationflags=0x08000000)
-        return "Выключение отменено."
-    if action not in flags:
+    if action not in flags and action != "cancel":
         raise PCError("Неизвестное действие питания.")
-    subprocess.run(["shutdown", flags[action], "/t", str(delay_sec)], check=False, creationflags=0x08000000)
+    try:
+        if action == "cancel":
+            subprocess.run(["shutdown", "/a"], check=False, creationflags=0x08000000)
+            return "Выключение отменено."
+        subprocess.run(["shutdown", flags[action], "/t", str(delay_sec)], check=False, creationflags=0x08000000)
+    except (OSError, ValueError) as exc:
+        raise PCError(f"Не удалось выполнить команду питания: {exc}") from exc
     verb = "Выключу" if action == "shutdown" else "Перезагружу"
     return f"{verb} компьютер через {delay_sec} секунд. Скажите «отмени выключение», чтобы отменить."
 
@@ -157,7 +170,10 @@ def system_info() -> str:
         parts.append(f"на диске свободно {disk.free / 1024**3:.0f} ГБ")
     except OSError:
         pass
-    battery = psutil.sensors_battery() if hasattr(psutil, "sensors_battery") else None
+    try:
+        battery = psutil.sensors_battery() if hasattr(psutil, "sensors_battery") else None
+    except Exception:  # на некоторых ПК датчик батареи недоступен
+        battery = None
     if battery is not None:
         parts.append(f"заряд батареи {battery.percent:.0f}%")
     return ", ".join(parts) + "."

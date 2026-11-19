@@ -159,8 +159,7 @@ class OpenAICompatChat(_ToolChatMixin):
         if response.status_code != 200:
             raise _status_error(self.name, response)
         try:
-            data = response.json()
-            return data["choices"][0]["message"]
+            return _message(response.json())
         except (ValueError, KeyError, IndexError, TypeError) as exc:
             raise CloudError("Сервис вернул непонятный ответ.") from exc
 
@@ -210,23 +209,56 @@ class OpenAICompatChat(_ToolChatMixin):
             if "400" not in str(exc) and "422" not in str(exc):
                 raise
             msg = self._post(body)  # сервис не поддерживает response_format
-        return _json_with_retry(self._post, messages, msg.get("content") or "", {"temperature": 0.1, "max_tokens": 8000})
+        return _json_with_retry(self._post, messages, msg, {"temperature": 0.1, "max_tokens": 8000}, schema)
 
 
-def _json_with_retry(post: Callable[[dict[str, Any]], dict[str, Any]], messages: list[dict[str, Any]], content: str,
-                     extra: dict[str, Any]) -> dict[str, Any]:
-    """Разбираем JSON; если не вышло — один раз просим модель прислать исправленный JSON целиком."""
-    from .llm import LLMError, _loads
+def _message(data: Any) -> dict[str, Any]:
+    """Сообщение модели из ответа chat/completions; finish_reason сохраняем — по нему видно обрыв ответа."""
+    choice = data["choices"][0]
+    msg = dict(choice["message"])
+    msg["finish_reason"] = str(choice.get("finish_reason") or "")
+    return msg
 
+
+def _json_with_retry(post: Callable[[dict[str, Any]], dict[str, Any]], messages: list[dict[str, Any]], first: Any,
+                     extra: dict[str, Any], schema: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Разбираем JSON; если не вышло или ответ оборвался по лимиту — один раз просим прислать JSON целиком покороче.
+
+    Если и повтор не разобрался, а первый ответ хотя бы частично читается, — берём его, чем ничего.
+    Итог приводится к схеме (normalize): числа из строк, недостающие ключи — по умолчанию.
+    """
+    from .llm import LLMError, _loads, normalize
+
+    if isinstance(first, dict):
+        content, finish = str(first.get("content") or ""), str(first.get("finish_reason") or "")
+    else:
+        content, finish = str(first or ""), ""
+    partial: dict[str, Any] | None = None
+    error: LLMError | None = None
     try:
-        return _loads(content)
+        partial = _loads(content, schema)
+    except LLMError as exc:
+        error = exc
+    if partial is not None and finish != "length":
+        return normalize(schema, partial) if schema else partial
+    reason = "ответ оборвался по лимиту длины" if finish == "length" else "это не корректный JSON"
+    fix = messages + [
+        {"role": "assistant", "content": content[:6000]},
+        {"role": "user", "content": f"Ошибка: {reason}. Пришли исправленный JSON целиком, покороче "
+                                    "(характеристики — кратко), без пояснений и markdown."},
+    ]
+    try:
+        retry = post({"messages": fix, **extra})
+        data = _loads(str(retry.get("content") or ""), schema)
     except LLMError:
-        fix = messages + [
-            {"role": "assistant", "content": content[:6000]},
-            {"role": "user", "content": "Это не корректный JSON (возможно, ответ оборвался). Пришли исправленный JSON целиком, "
-                                        "покороче, без пояснений и markdown."},
-        ]
-        return _loads(post({"messages": fix, **extra}).get("content") or "")
+        if partial is None:
+            raise
+        data = partial
+    except CloudError:
+        if partial is None:
+            raise error if error is not None else LLMError("ИИ не ответил на повторный запрос.", raw=content)
+        data = partial
+    return normalize(schema, data) if schema else data
 
 
 class GigaChat(_ToolChatMixin):
@@ -266,31 +298,40 @@ class GigaChat(_ToolChatMixin):
             raise CloudError(f"GigaChat недоступен ({exc.__class__.__name__}).") from exc
         if response.status_code != 200:
             raise _status_error("GigaChat (авторизация)", response)
-        data = response.json()
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise CloudError("GigaChat (авторизация) вернул непонятный ответ. Проверьте ключ и scope в настройках.") from exc
         self._token = data.get("access_token", "")
+        if not self._token:
+            raise CloudError("GigaChat не выдал токен доступа. Проверьте ключ авторизации и scope (PERS/B2B/CORP).")
         expires = float(data.get("expires_at") or 0)
         self._token_until = expires / 1000 if expires > 1e11 else (expires or time.time() + 1500)
         return self._token
 
     def _post(self, body: dict[str, Any]) -> dict[str, Any]:
-        try:
-            response = self._http.post(
-                GIGACHAT_API, json={"model": self._model, **body},
-                headers={"Authorization": f"Bearer {self._access_token()}", "Accept": "application/json"},
-                timeout=180, verify=self._verify,
-            )
-        except requests.exceptions.SSLError as exc:
-            raise CloudError("GigaChat: не удалось проверить сертификат. Положите сертификаты Минцифры в папку certs.") from exc
-        except requests.RequestException as exc:
-            raise CloudError(f"GigaChat недоступен ({exc.__class__.__name__}).") from exc
-        if response.status_code == 401:
-            self._token = ""
-        if response.status_code != 200:
-            raise _status_error("GigaChat", response)
-        try:
-            return response.json()["choices"][0]["message"]
-        except (ValueError, KeyError, IndexError, TypeError) as exc:
-            raise CloudError("GigaChat вернул непонятный ответ.") from exc
+        for attempt in range(2):  # 401: токен истёк раньше срока — берём новый и повторяем один раз
+            try:
+                response = self._http.post(
+                    GIGACHAT_API, json={"model": self._model, **body},
+                    headers={"Authorization": f"Bearer {self._access_token()}", "Accept": "application/json"},
+                    timeout=180, verify=self._verify,
+                )
+            except requests.exceptions.SSLError as exc:
+                raise CloudError("GigaChat: не удалось проверить сертификат. Положите сертификаты Минцифры в папку certs.") from exc
+            except requests.RequestException as exc:
+                raise CloudError(f"GigaChat недоступен ({exc.__class__.__name__}).") from exc
+            if response.status_code == 401:
+                self._token = ""
+                if attempt == 0:
+                    continue
+            if response.status_code != 200:
+                raise _status_error("GigaChat", response)
+            try:
+                return _message(response.json())
+            except (ValueError, KeyError, IndexError, TypeError) as exc:
+                raise CloudError("GigaChat вернул непонятный ответ.") from exc
+        raise _status_error("GigaChat", response)
 
     def _ask_once(self, text: str) -> str:
         from .tools import TOOL_DEFINITIONS
@@ -330,4 +371,4 @@ class GigaChat(_ToolChatMixin):
         messages = [{"role": "system", "content": system + json_hint(schema)}, {"role": "user", "content": prompt}]
         extra = {"temperature": 0.1, "max_tokens": 8000}
         msg = self._post({"messages": messages, **extra})
-        return _json_with_retry(self._post, messages, msg.get("content") or "", extra)
+        return _json_with_retry(self._post, messages, msg, extra, schema)

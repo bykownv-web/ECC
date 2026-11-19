@@ -12,6 +12,8 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -19,8 +21,8 @@ from typing import Any, Callable
 
 from . import tender_ai, tender_docs
 from .config import Config, app_data_dir, documents_dir
-from .llm import LLM, LLMError
-from .procurement import ProcurementError, Purchase, format_money
+from .llm import LLM, LLMError, normalize, to_bool, to_number
+from .procurement import ProcurementError, Purchase, format_money, parse_price
 
 SCORE_BATCH = 15
 MAX_STORE = 3000
@@ -81,48 +83,88 @@ def store_path() -> Path:
     return app_data_dir() / "analyst.json"
 
 
+def write_json_atomic(path: Path, data: Any, indent: int | None = None) -> None:
+    """Запись через временный файл: при сбое посреди записи старый файл не превращается в обрывок."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=indent), encoding="utf-8")
+    os.replace(tmp, path)
+
+
 class AnalystStore:
     def __init__(self, path: Path | None = None) -> None:
         self._path = path or store_path()
-        self._lock = threading.Lock()
+        self.lock = threading.RLock()  # оценка, разбор и отчёты из вкладки «Заявка» идут из разных потоков
         try:
             data = json.loads(self._path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
             data = {}
-        self.scores: dict[str, dict[str, Any]] = data.get("scores", {}) if isinstance(data, dict) else {}
-        self.reports: list[dict[str, Any]] = data.get("reports", []) if isinstance(data, dict) else []
+        scores = data.get("scores", {}) if isinstance(data, dict) else {}
+        reports = data.get("reports", []) if isinstance(data, dict) else []
+        self.scores: dict[str, dict[str, Any]] = {str(k): v for k, v in scores.items() if isinstance(v, dict)} if isinstance(scores, dict) else {}
+        self.reports: list[dict[str, Any]] = [
+            r for r in reports if isinstance(r, dict) and isinstance(r.get("purchase"), dict)
+        ] if isinstance(reports, list) else []
+
+    def put_report(self, report: dict[str, Any]) -> None:
+        """Новый отчёт — первым; старый отчёт по той же закупке заменяется."""
+        number = str(report["purchase"].get("number"))
+        with self.lock:
+            self.reports = [r for r in self.reports if str(r["purchase"].get("number")) != number]
+            self.reports.insert(0, report)
+            self.save()
 
     def save(self) -> None:
-        with self._lock:
+        with self.lock:
             if len(self.scores) > MAX_STORE:
-                keep = sorted(self.scores.items(), key=lambda kv: kv[1].get("at", ""))[-MAX_STORE // 2:]
+                keep = sorted(self.scores.items(), key=lambda kv: str(kv[1].get("at", "")))[-MAX_STORE // 2:]
                 self.scores = dict(keep)
             self.reports = self.reports[:100]
-            self._path.write_text(json.dumps({"scores": self.scores, "reports": self.reports}, ensure_ascii=False), encoding="utf-8")
+            write_json_atomic(self._path, {"scores": self.scores, "reports": self.reports})
 
 
-def compute_totals(estimate: dict[str, Any], nmck: float | None) -> dict[str, Any]:
-    """Итоги, маржа и её процент считаются здесь, а не моделью."""
+def _num(value: Any) -> float:
+    """Число из ответа ИИ: 450000, "450 000,00", "≈450 тыс.", None → 0. Отрицательные суммы не имеют смысла."""
+    num = to_number(value)
+    return max(0.0, num) if num is not None else 0.0
+
+
+def compute_totals(estimate: dict[str, Any], nmck: Any) -> dict[str, Any]:
+    """Итоги, маржа и её процент считаются здесь, а не моделью.
+
+    Числа могут прийти строками («1 234,5», «85%») или пустыми — это не должно ронять расчёт.
+    """
+    if not isinstance(estimate, dict):
+        estimate = {}
+    nmck_value = to_number(nmck) if not isinstance(nmck, str) else parse_price(nmck)
+    nmck_value = nmck_value if nmck_value and nmck_value > 0 else None
     eq_min = eq_max = 0.0
-    for item in estimate.get("equipment") or []:
-        qty = float(item.get("quantity") or 0) or 1.0
-        lo = float(item.get("unit_cost_min") or 0)
-        hi = float(item.get("unit_cost_max") or 0) or lo
+    equipment = estimate.get("equipment")
+    equipment = [e for e in equipment if isinstance(e, dict)] if isinstance(equipment, list) else []
+    estimate["equipment"] = equipment
+    for item in equipment:
+        qty = _num(item.get("quantity")) or 1.0
+        lo = _num(item.get("unit_cost_min"))
+        hi = _num(item.get("unit_cost_max")) or lo
+        lo = lo or hi
         lo, hi = min(lo, hi), max(lo, hi)
         item["total_min"] = round(lo * qty, 2)
         item["total_max"] = round(hi * qty, 2)
         eq_min += lo * qty
         eq_max += hi * qty
-    inst_min = float(estimate.get("installation_cost_min") or 0) if estimate.get("installation_required") else 0.0
-    inst_max = float(estimate.get("installation_cost_max") or 0) if estimate.get("installation_required") else 0.0
-    inst_min, inst_max = min(inst_min, inst_max or inst_min), max(inst_min, inst_max)
+    required = to_bool(estimate.get("installation_required"))
+    estimate["installation_required"] = required
+    inst_min = _num(estimate.get("installation_cost_min")) if required else 0.0
+    inst_max = _num(estimate.get("installation_cost_max")) if required else 0.0
+    inst_min, inst_max = min(inst_min or inst_max, inst_max or inst_min), max(inst_min, inst_max)
     cost_min, cost_max = eq_min + inst_min, eq_max + inst_max
     totals: dict[str, Any] = {
         "equipment_min": round(eq_min, 2), "equipment_max": round(eq_max, 2),
         "installation_min": round(inst_min, 2), "installation_max": round(inst_max, 2),
         "cost_min": round(cost_min, 2), "cost_max": round(cost_max, 2),
-        "nmck": nmck, "margin_min": None, "margin_max": None, "margin_pct_min": None, "margin_pct_max": None,
+        "nmck": nmck_value, "margin_min": None, "margin_max": None, "margin_pct_min": None, "margin_pct_max": None,
     }
+    nmck = nmck_value
     if nmck:
         totals["margin_min"] = round(nmck - cost_max, 2)
         totals["margin_max"] = round(nmck - cost_min, 2)
@@ -142,16 +184,18 @@ def estimate_costs(llm: Any, purchase: dict[str, Any], analysis: dict[str, Any])
         for pos in analysis.get("positions") or []:
             candidates.extend(c for c in tender_ai._catalog_candidates(pos, catalog, limit=10) if c not in candidates)
         context["catalog"] = candidates[:60]
-    estimate = llm.json(ESTIMATE_SYSTEM, json.dumps(context, ensure_ascii=False), ESTIMATE_SCHEMA)
-    price = purchase.get("price")
-    return estimate, compute_totals(estimate, float(price) if price else None)
+    estimate = llm.json(ESTIMATE_SYSTEM, json.dumps(context, ensure_ascii=False, default=str), ESTIMATE_SCHEMA)
+    estimate = normalize(ESTIMATE_SCHEMA, estimate if isinstance(estimate, dict) else {})
+    return estimate, compute_totals(estimate, purchase.get("price"))
 
 
 def format_report(report: dict[str, Any]) -> str:
     """Текстовый отчёт для Telegram и почты."""
-    p = report["purchase"]
+    p = report.get("purchase") or {}
     t = report.get("totals") or {}
     e = report.get("estimate") or {}
+    if not isinstance(e, dict):
+        e = {}
     lines = [
         f"{(p.get('title') or '')[:200]}",
         f"№ {p.get('number')} · {p.get('law') or ''} · НМЦК {format_money(p.get('price'))} · подача до {p.get('deadline') or '—'}",
@@ -178,12 +222,30 @@ def format_report(report: dict[str, Any]) -> str:
                 f"Маржа к НМЦК: {format_money(t['margin_min'])} – {format_money(t['margin_max'])} "
                 f"({t['margin_pct_min']}% – {t['margin_pct_max']}%)"
             )
-        if e.get("risks"):
-            lines.append("Риски: " + "; ".join(e["risks"]))
-        lines.append(f"Рекомендация: {e.get('recommendation', '—').upper()} — {e.get('reasoning', '')}")
+        risks = [str(r) for r in e.get("risks") or [] if r] if isinstance(e.get("risks"), list) else []
+        if risks:
+            lines.append("Риски: " + "; ".join(risks))
+        lines.append(f"Рекомендация: {str(e.get('recommendation') or '—').upper()} — {e.get('reasoning') or ''}")
+    if e.get("note"):
+        lines.append(str(e["note"]))
     lines.append(p.get("url") or "")
     lines.append("Цены ориентировочные, проверьте перед участием.")
-    return "\n".join(line for line in lines if line is not None)
+    return "\n".join(line for line in lines if line)
+
+
+def _score(value: Any) -> int:
+    """Балл 0–100 из ответа ИИ: 85, "85", "85%", "85/100", 85.5 — всё приводится к целому."""
+    num = to_number(value)
+    return max(0, min(100, int(round(num)))) if num is not None else 0
+
+
+def _number_key(value: Any) -> str:
+    """Номер закупки для сравнения: только цифры, без ведущих нулей (ИИ может вернуть номер числом и потерять «0»)."""
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    text = str(value if value is not None else "").strip()
+    digits = re.sub(r"\D", "", text)
+    return (digits.lstrip("0") or digits) if digits else text.lower()
 
 
 class Analyst:
@@ -205,34 +267,59 @@ class Analyst:
         self._emit("analyst_status", {"text": text, "busy": True})
 
     def snapshot(self) -> dict[str, Any]:
-        top = sorted(self.store.scores.values(), key=lambda s: -int(s.get("score", 0)))[:40]
-        return {"reports": self.store.reports[:30], "scores": top, "settings": self.settings()}
+        with self.store.lock:
+            top = sorted(self.store.scores.values(), key=lambda s: -_score(s.get("score")))[:40]
+            reports = list(self.store.reports[:30])
+        return {"reports": reports, "scores": top, "settings": self.settings()}
 
     # ---------- шаг 1: оценка ----------
     def score(self, purchases: list[Purchase]) -> list[dict[str, Any]]:
         profile = self.settings().get("profile", "").strip()
         if not profile:
             raise ValueError("Заполните профиль компании на вкладке «Аналитика»: что вы поставляете и монтируете.")
-        new = [p for p in purchases if p.number not in self.store.scores]
-        llm = self._llm_factory()
+        unique: dict[str, Purchase] = {}
+        for p in purchases:
+            unique.setdefault(p.number, p)
+        new = [p for p in unique.values() if p.number not in self.store.scores]
+        llm = self._llm_factory() if new else None
+        errors: list[str] = []
         for i in range(0, len(new), SCORE_BATCH):
             batch = new[i:i + SCORE_BATCH]
             self._progress(f"Оцениваю закупки: {min(i + SCORE_BATCH, len(new))} из {len(new)}…")
-            payload = [{"number": p.number, "title": p.title[:300], "customer": p.customer[:120], "nmck": p.price} for p in batch]
-            data = llm.json(SCORE_SYSTEM, f"Профиль компании:\n{profile}\n\nЗакупки:\n{json.dumps(payload, ensure_ascii=False)}", SCORE_SCHEMA)
-            got = {str(s.get("number")): s for s in data.get("scores") or [] if isinstance(s, dict)}
+            payload = [{"number": p.number, "title": (p.title or "")[:300], "customer": (p.customer or "")[:120], "nmck": p.price}
+                       for p in batch]
+            try:
+                data = llm.json(SCORE_SYSTEM, f"Профиль компании:\n{profile}\n\nЗакупки:\n{json.dumps(payload, ensure_ascii=False)}",
+                                SCORE_SCHEMA)
+            except LLMError as exc:  # одна неудачная пачка не отменяет остальные
+                errors.append(str(exc))
+                continue
+            data = normalize(SCORE_SCHEMA, data if isinstance(data, dict) else {})
+            items = [s for s in data.get("scores") or [] if isinstance(s, dict)]
+            got: dict[str, dict[str, Any]] = {}
+            for idx, s in enumerate(items):
+                key = _number_key(s.get("number"))
+                if not key and len(items) == len(batch):  # номер не указан, но порядок совпадает со входом
+                    key = _number_key(batch[idx].number)
+                if key:
+                    got.setdefault(key, s)
             stamp = datetime.now().isoformat(timespec="seconds")
-            for p in batch:
-                s = got.get(p.number)
-                if s is None:
-                    continue  # модель пропустила — оценим в следующий раз
-                self.store.scores[p.number] = {
-                    "number": p.number, "score": max(0, min(100, int(s.get("score", 0)))), "reason": str(s.get("reason", ""))[:300],
-                    "title": p.title, "customer": p.customer, "price": p.price, "deadline": p.deadline, "law": p.law, "url": p.url, "at": stamp,
-                }
+            with self.store.lock:
+                for p in batch:
+                    s = got.get(_number_key(p.number))
+                    if s is None:
+                        continue  # модель пропустила — оценим в следующий раз
+                    self.store.scores[p.number] = {
+                        "number": p.number, "score": _score(s.get("score")), "reason": str(s.get("reason") or "")[:300],
+                        "title": p.title, "customer": p.customer, "price": p.price, "deadline": p.deadline, "law": p.law,
+                        "url": p.url, "at": stamp,
+                    }
         self.store.save()
-        by_number = {p.number for p in purchases}
-        return sorted((s for n, s in self.store.scores.items() if n in by_number), key=lambda s: -s["score"])
+        if new and errors and not any(p.number in self.store.scores for p in new):
+            raise LLMError(f"ИИ не смог оценить закупки: {errors[0]}")
+        with self.store.lock:
+            scored = [s for n, s in self.store.scores.items() if n in unique]
+        return sorted(scored, key=lambda s: -_score(s.get("score")))
 
     # ---------- шаг 2: глубокий разбор ----------
     def deep_report(self, scored: dict[str, Any]) -> dict[str, Any]:
@@ -240,24 +327,39 @@ class Analyst:
         report: dict[str, Any] = {
             "purchase": purchase, "score": scored.get("score"), "score_reason": scored.get("reason", ""),
             "at": datetime.now().isoformat(timespec="seconds"), "analysis": None, "estimate": None, "totals": None, "error": "",
+            "files": [], "warnings": [],
         }
         folder = documents_dir() / "Аналитика" / tender_docs.safe_name(str(purchase["number"]))
-        llm = self._llm_factory()
+        step = "скачивание документов"
         try:
+            if not purchase.get("url"):
+                raise ValueError("у закупки нет ссылки на ЕИС")
+            llm = self._llm_factory()
             self._progress(f"Скачиваю документы № {purchase['number']}…")
             files = tender_docs.fetch_eis_documents(self._client_factory(), purchase["url"], folder / "files")
-            _, text = tender_docs.process_files(files, folder / "files")
+            report["warnings"].extend(getattr(files, "errors", []))
+            step = "извлечение текста"
+            infos, text = tender_docs.process_files(files, folder / "files")
+            report["files"] = [f.to_dict() for f in infos]
+            report["warnings"].extend(f"{f.name}: {f.status}" for f in infos if f.kind == "error")
             if not text.strip():
                 raise ValueError("в документах нет текста (возможно, сканы)")
+            step = "разбор ТЗ"
             analysis = tender_ai.analyze_tz(llm, text, on_progress=self._progress)
             report["analysis"] = analysis
+            step = "расчёт стоимости"
             self._progress(f"Считаю стоимость № {purchase['number']}…")
             report["estimate"], report["totals"] = estimate_costs(llm, purchase, analysis)
         except (ProcurementError, LLMError, ValueError, OSError) as exc:
             report["error"] = str(exc)
-        (folder).mkdir(parents=True, exist_ok=True)
-        (folder / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=1), encoding="utf-8")
-        (folder / "Отчёт.txt").write_text(format_report(report), encoding="utf-8")
+        except Exception as exc:  # неожиданная ошибка в одной закупке не должна останавливать аналитику
+            report["error"] = f"сбой на шаге «{step}» ({exc.__class__.__name__}: {exc})"
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            write_json_atomic(folder / "report.json", report, indent=1)
+            (folder / "Отчёт.txt").write_text(format_report(report), encoding="utf-8")
+        except OSError as exc:
+            report["warnings"].append(f"отчёт не сохранён в папку: {exc}")
         return report
 
     def upsert_report(self, report: dict[str, Any]) -> None:
@@ -266,9 +368,7 @@ class Analyst:
         scored = self.store.scores.get(str(number)) or {}
         report.setdefault("score", scored.get("score"))
         report.setdefault("score_reason", scored.get("reason", ""))
-        self.store.reports = [r for r in self.store.reports if r["purchase"].get("number") != number]
-        self.store.reports.insert(0, report)
-        self.store.save()
+        self.store.put_report(report)
         self._emit("analyst_state", self.snapshot())
 
     def run(self, purchases: list[Purchase], notify: bool = True) -> list[dict[str, Any]]:
@@ -277,20 +377,27 @@ class Analyst:
         try:
             s = self.settings()
             scored = self.score(purchases)
-            done = {r["purchase"]["number"] for r in self.store.reports}
-            min_score = int(s.get("min_score", 60))
-            todo = [x for x in scored if x["score"] >= min_score and x["number"] not in done][: int(s.get("top_n", 3))]
+            with self.store.lock:
+                # закупки с удачным отчётом не разбираем повторно; неудачные (ЕИС была недоступна и т.п.) — пробуем снова
+                done = {str(r["purchase"].get("number")) for r in self.store.reports if not r.get("error")}
+            min_score = _score(s.get("min_score", 60))
+            top_n = max(1, int(to_number(s.get("top_n", 3)) or 3))
+            todo = [x for x in scored if _score(x.get("score")) >= min_score and str(x["number"]) not in done][:top_n]
             new_reports = []
             for item in todo:
                 report = self.deep_report(item)
-                self.store.reports.insert(0, report)
-                self.store.save()
+                self.store.put_report(report)
                 new_reports.append(report)
                 self._emit("analyst_state", self.snapshot())
-                if notify and self._notify:
+                if notify and self._notify and not report.get("error"):
                     self._notify(f"Интересная закупка ({report['score']}/100)", format_report(report))
+            failed = sum(1 for r in new_reports if r.get("error"))
+            tail = f", с ошибкой {failed} (причина — в карточке отчёта)" if failed else ""
             self._emit("analyst_state", self.snapshot())
-            self._emit("analyst_status", {"text": f"Готово: оценено {len(scored)}, разобрано подробно {len(new_reports)}.", "busy": False})
+            self._emit("analyst_status", {"text": f"Готово: оценено {len(scored)}, разобрано подробно {len(new_reports)}{tail}.", "busy": False})
             return new_reports
+        except Exception as exc:
+            self._emit("analyst_status", {"text": str(exc) or exc.__class__.__name__, "busy": False, "error": True})
+            raise
         finally:
             self._lock.release()

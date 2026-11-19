@@ -3,16 +3,27 @@
 from __future__ import annotations
 
 import threading
+import traceback
 from typing import Any, Callable
 
-from .config import Config, get_api_key
+from .config import Config, app_data_dir, get_api_key
 from .local_commands import parse_command
-from .cloud_llm import CloudError, GigaChat, OpenAICompatChat
+from .cloud_llm import GIGACHAT_KEY, CloudError, GigaChat, OpenAICompatChat
+from .notify import get_secret
 from .ollama_brain import OllamaChat, OllamaError
 from .procurement import analyze, format_money
 from .tools import TOOL_DEFINITIONS, ToolBox, ToolError
 
 MAX_TOOL_ROUNDS = 8
+PROVIDERS = ("ollama", "gigachat", "openai", "claude", "none")
+
+
+def _log_error(exc: BaseException) -> None:
+    try:
+        with open(app_data_dir() / "error.log", "a", encoding="utf-8") as fh:
+            fh.write("".join(traceback.format_exception(exc)) + "\n")
+    except OSError:
+        pass
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
 SYSTEM_PROMPT = """Ты — {name}, голосовой помощник на компьютере пользователя под Windows, в духе J.A.R.V.I.S.
@@ -43,18 +54,22 @@ class Brain:
         self._ollama_sig: tuple[str, ...] | None = None
 
     def reset(self) -> None:
+        """Новый разговор. Чат пересоздаётся: так подхватываются новые ключи и токены (GigaChat кэширует токен)."""
         with self._lock:
             self._messages = []
-            if self._ollama is not None:
-                self._ollama.reset()
+            self._ollama = None
+            self._ollama_sig = None
 
     def provider(self) -> str:
-        return str(self._config.get("ai_provider", "ollama"))
+        provider = str(self._config.get("ai_provider", "ollama") or "ollama").strip().lower()
+        return provider if provider in PROVIDERS else "ollama"
 
     def has_ai(self) -> bool:
         provider = self.provider()
-        if provider in ("ollama", "openai", "gigachat"):
+        if provider in ("ollama", "openai"):
             return True
+        if provider == "gigachat":
+            return bool(get_secret(GIGACHAT_KEY))
         return provider == "claude" and bool(get_api_key())
 
     def _system_prompt(self) -> str:
@@ -101,32 +116,42 @@ class Brain:
         return self._client
 
     def ask(self, text: str) -> str:
-        text = (text or "").strip()
+        text = str(text or "").strip()
         if not text:
             return ""
         provider = self.provider()
-        if provider in ("openai", "gigachat"):
-            with self._lock:
-                try:
-                    return self._get_cloud().ask(text)
-                except CloudError as exc:
-                    if parse_command(text) is not None:
-                        return self._local(text)
-                    return str(exc)
-        if provider == "ollama":
-            with self._lock:
-                try:
-                    return self._get_ollama().ask(text)
-                except OllamaError as exc:
-                    # Простые команды работают и без модели.
-                    if parse_command(text) is not None:
-                        return self._local(text)
-                    return str(exc)
-        client = self._get_client() if provider == "claude" else None
-        if client is None:
+        try:
+            if provider in ("openai", "gigachat", "ollama"):
+                with self._lock:
+                    try:
+                        chat = self._get_ollama() if provider == "ollama" else self._get_cloud()
+                        return str(chat.ask(text) or "Готово.")
+                    except (CloudError, OllamaError) as exc:
+                        # Простые команды работают и без модели.
+                        return self._fallback(text, str(exc))
+                    except Exception:
+                        # История чата могла остаться без ответа на вызов инструмента — начинаем её заново.
+                        self._ollama = None
+                        self._ollama_sig = None
+                        raise
+            if provider == "claude":
+                client = self._get_client()
+                if client is not None:
+                    with self._lock:
+                        return self._ask_claude(client, text)
             return self._local(text)
-        with self._lock:
-            return self._ask_claude(client, text)
+        except Exception as exc:  # ошибка ИИ не должна оставлять пользователя без ответа
+            _log_error(exc)
+            return self._fallback(text, f"Ошибка ИИ ({exc.__class__.__name__}). Подробности в error.log.")
+
+    def _fallback(self, text: str, message: str) -> str:
+        if parse_command(text) is None:
+            return message
+        try:
+            return self._local(text)
+        except Exception as exc:
+            _log_error(exc)
+            return message
 
     # ---------- без ИИ ----------
     def _local(self, text: str) -> str:
@@ -185,17 +210,21 @@ class Brain:
                     del self._messages[history_len:]
                     return self._final_text(response.content) or "Ответ получился слишком длинным."
 
-                tool_uses = [b for b in response.content if b.type == "tool_use"]
-                if response.stop_reason != "tool_use" or not tool_uses:
+                tool_uses = [b for b in response.content if getattr(b, "type", "") == "tool_use"]
+                if not tool_uses:
                     return self._final_text(response.content) or "Готово."
+                # Каждый tool_use в истории обязан получить tool_result — иначе следующий запрос API отклонит.
 
                 results = []
                 for block in tool_uses:
                     if self._on_tool:
-                        self._on_tool(block.name)
+                        try:
+                            self._on_tool(block.name)
+                        except Exception:
+                            pass
                     args = block.input if isinstance(block.input, dict) else {}
                     try:
-                        output = self._toolbox.execute(block.name, args)
+                        output = str(self._toolbox.execute(block.name, args) or "Готово.")
                         results.append({"type": "tool_result", "tool_use_id": block.id, "content": output[:20000]})
                     except ToolError as exc:
                         results.append(
@@ -222,16 +251,20 @@ class Brain:
             return "У API-ключа нет доступа к этой модели."
         except anthropic.RateLimitError:
             del self._messages[history_len:]
-            return "Слишком много запросов к Claude, попробуйте через минуту."
+            return self._fallback(text, "Слишком много запросов к Claude, попробуйте через минуту.")
         except anthropic.BadRequestError as exc:
             del self._messages[history_len:]
             return f"Claude отклонил запрос: {exc.message}"
         except anthropic.APIStatusError as exc:
             del self._messages[history_len:]
-            return f"Ошибка сервера Claude ({exc.status_code}). Попробуйте позже."
+            return self._fallback(text, f"Ошибка сервера Claude ({exc.status_code}). Попробуйте позже.")
         except anthropic.APIConnectionError:
             del self._messages[history_len:]
-            return "Нет связи с Claude. Проверьте интернет."
+            return self._fallback(text, "Нет связи с Claude. Проверьте интернет.")
+        except Exception:
+            # Любая другая ошибка: убираем незавершённый ход (tool_use без tool_result сломал бы следующие запросы).
+            del self._messages[history_len:]
+            raise
 
     @staticmethod
     def _final_text(content) -> str:

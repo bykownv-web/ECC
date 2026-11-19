@@ -88,6 +88,8 @@ class OllamaChat:
             raise OllamaError("Ollama не запущена. Запустите приложение Ollama и повторите.") from exc
         except requests.Timeout as exc:
             raise OllamaError("Модель отвечает слишком долго. Попробуйте модель поменьше.") from exc
+        except requests.RequestException as exc:
+            raise OllamaError(f"Ошибка связи с Ollama ({exc.__class__.__name__}).") from exc
         if response.status_code == 404:
             raise OllamaError(
                 f"Модель {self._model} не скачана. Выполните в PowerShell: ollama pull {self._model}"
@@ -126,7 +128,7 @@ class OllamaChat:
                         result = f"Ошибка: {exc}"
                     except Exception as exc:  # инструмент не должен ронять разговор
                         result = f"Внутренняя ошибка: {exc.__class__.__name__}"
-                    self._messages.append({"role": "tool", "tool_name": name, "content": result[:8000]})
+                    self._messages.append({"role": "tool", "tool_name": name, "content": str(result)[:8000]})
             del self._messages[start:]
             return "Задача оказалась слишком длинной, я остановился. Уточните запрос."
         except OllamaError:

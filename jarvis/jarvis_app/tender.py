@@ -15,7 +15,7 @@ from typing import Any, Callable
 from . import doc_builder, tender_ai, tender_docs
 from .config import Config, app_data_dir, documents_dir
 from .llm import LLM
-from .procurement import ProcurementClient, SearchParams
+from .procurement import ProcurementClient, ProcurementError, SearchParams
 
 EventSink = Callable[[str, dict[str, Any]], None]
 
@@ -36,11 +36,19 @@ def load_catalog() -> list[dict[str, Any]]:
         return []
 
 
+class _Cancelled(Exception):
+    """Пользователь выбрал другую закупку — результаты старой не записываем."""
+
+
+def _plural_files(n: int) -> str:
+    return "файл" if n % 10 == 1 and n % 100 != 11 else ("файла" if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14 else "файлов")
+
+
 class TenderWorkspace:
     def __init__(self, config: Config, emit: EventSink) -> None:
         self._config = config
         self._emit = emit
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._pipeline_lock = threading.Lock()
         self._gen = 0  # номер выбранной закупки: конвейер старой закупки останавливается
         self.state: dict[str, Any] = self._empty()
@@ -49,28 +57,48 @@ class TenderWorkspace:
     def _empty() -> dict[str, Any]:
         return {
             "purchase": None, "files": [], "text_chars": 0, "analysis": None, "matches": [], "documents": [],
-            "estimate": None, "totals": None, "steps": {},
+            "estimate": None, "totals": None, "steps": {}, "download_errors": [],
         }
 
     # ---------- хранение ----------
-    def folder(self) -> Path:
-        purchase = self.state.get("purchase") or {}
+    def _folder_for(self, state: dict[str, Any]) -> Path:
+        purchase = state.get("purchase") or {}
         number = tender_docs.safe_name(str(purchase.get("number") or "без_номера"))
         path = documents_dir() / "Заявки" / number
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    def _save(self) -> None:
-        (self.folder() / "state.json").write_text(json.dumps(self.state, ensure_ascii=False, indent=1), encoding="utf-8")
+    def folder(self) -> Path:
+        return self._folder_for(self.state)
 
-    def _text_path(self) -> Path:
-        return self.folder() / "tz_text.txt"
+    def _save(self) -> None:
+        from .analyst import write_json_atomic
+
+        write_json_atomic(self.folder() / "state.json", self.state, indent=1)
+
+    def _text_path(self, folder: Path | None = None) -> Path:
+        return (folder or self.folder()) / "tz_text.txt"
+
+    def _ctx(self, gen: int | None = None) -> tuple[int, dict[str, Any], Path]:
+        """Снимок «какая закупка сейчас»: номер поколения, её состояние и папка."""
+        with self._lock:
+            if gen is not None and gen != self._gen:
+                raise _Cancelled()
+            return self._gen, self.state, self.folder()
+
+    def _commit(self, gen: int, **updates: Any) -> None:
+        """Записывает результат шага, только если закупка за это время не сменилась."""
+        with self._lock:
+            if gen != self._gen:
+                raise _Cancelled()
+            self.state.update(updates)
+            self._save()
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
-            data = json.loads(json.dumps(self.state, ensure_ascii=False))
+            data = json.loads(json.dumps(self.state, ensure_ascii=False, default=str))
+            data["folder"] = str(self.folder()) if self.state.get("purchase") else ""
         data["catalog_count"] = len(load_catalog())
-        data["folder"] = str(self.folder()) if self.state.get("purchase") else ""
         return data
 
     def _publish(self, status: str = "", busy: bool = False) -> None:
@@ -78,6 +106,15 @@ class TenderWorkspace:
 
     def _progress(self, text: str) -> None:
         self._emit("tender_status", {"text": text, "busy": True})
+
+    def _progress_for(self, gen: int) -> Callable[[str], None]:
+        """Прогресс, который заодно прерывает долгий разбор, если пользователь выбрал другую закупку."""
+        def report(text: str) -> None:
+            if gen != self._gen:
+                raise _Cancelled()
+            self._progress(text)
+
+        return report
 
     # ---------- закупка ----------
     def set_purchase(self, purchase: dict[str, Any]) -> None:
@@ -94,39 +131,48 @@ class TenderWorkspace:
                 try:
                     stored = json.loads(saved.read_text(encoding="utf-8"))
                     if isinstance(stored, dict):
-                        stored["purchase"] = self.state["purchase"]
-                        self.state.update(stored)
-                except (OSError, json.JSONDecodeError):
+                        stored["purchase"] = {**(stored.get("purchase") or {}), **{k: v for k, v in self.state["purchase"].items() if v}}
+                        steps = stored.get("steps") if isinstance(stored.get("steps"), dict) else {}
+                        # шаг «выполняется» из прошлого запуска (приложение закрыли посреди работы) — начнём его заново
+                        stored["steps"] = {k: v for k, v in steps.items() if isinstance(v, dict) and v.get("status") != "running"}
+                        self.state.update({k: v for k, v in stored.items() if k in self.state})
+                except (OSError, json.JSONDecodeError, UnicodeDecodeError):
                     pass
             self._save()
         self._publish("Закупка выбрана.")
 
     def find_purchase(self, value: str, client: ProcurementClient) -> dict[str, Any]:
         """Находит закупку по номеру или ссылке через поиск ЕИС."""
+        import re
+
         value = (value or "").strip()
         number = "".join(ch for ch in value if ch.isdigit()) if not value.startswith("http") else ""
         if value.startswith("http"):
             url = tender_docs.purchase_url_from_input(value)
             if not url:
                 raise TenderError("Это не ссылка на zakupki.gov.ru.")
-            import re
-
-            match = re.search(r"regNumber=(\d+)", url)
+            match = re.search(r"(?:regNumber|purchaseNumber|purchaseNoticeNumber)=(\d+)", url)
             number = match.group(1) if match else ""
             if not number:
                 return {"number": "по_ссылке", "url": url, "title": "Закупка по ссылке"}
         if len(number) < 11:
             raise TenderError("Введите номер закупки (11 или 19 цифр) или ссылку на неё.")
-        found = client.search(SearchParams(query=number, only_active=False))
+        try:
+            found = client.search(SearchParams(query=number, only_active=False))
+        except ProcurementError as exc:
+            # Поиск ЕИС недоступен — работаем по прямой ссылке: документы можно скачать или добавить вручную.
+            url = tender_docs.purchase_url_from_input(value if value.startswith("http") else number)
+            return {"number": number, "url": url, "title": f"Закупка № {number} (поиск ЕИС недоступен: {exc})"}
         for item in found:
             if item.number == number:
                 return item.to_dict()
-        url = tender_docs.purchase_url_from_input(number)
+        url = tender_docs.purchase_url_from_input(value if value.startswith("http") else number)
         return {"number": number, "url": url, "title": "Закупка (не найдена в поиске ЕИС)"}
 
     # ---------- документы ----------
-    def _ingest(self, paths: list[Path]) -> None:
-        work = self.folder() / "files"
+    def _ingest(self, paths: list[Path], gen: int | None = None) -> None:
+        gen, _, folder = self._ctx(gen)
+        work = folder / "files"
         work.mkdir(parents=True, exist_ok=True)
         for path in paths:
             target = work / tender_docs.safe_name(path.name)
@@ -134,83 +180,100 @@ class TenderWorkspace:
                 shutil.copy2(path, target)
         self._progress("Извлекаю текст из документов…")
         # Каждый раз разбираем все файлы заявки, чтобы ТЗ всегда шло первым, а контракт — выжимкой.
-        all_files = sorted(p for p in work.iterdir() if p.is_file())
+        all_files = sorted(p for p in work.iterdir() if p.is_file() and not p.name.endswith((".tmp", ".part")))
         files, text = tender_docs.process_files(all_files, work)
         with self._lock:
-            self.state["files"] = [f.to_dict() for f in files]
-            self._text_path().write_text(text, encoding="utf-8")
-            self.state["text_chars"] = len(text)
-            self.state.update(analysis=None, matches=[], estimate=None, totals=None, documents=[])
-            self._save()
+            if gen != self._gen:
+                raise _Cancelled()
+            self._text_path(folder).write_text(text, encoding="utf-8")
+        self._commit(gen, files=[f.to_dict() for f in files], text_chars=len(text),
+                     analysis=None, matches=[], estimate=None, totals=None, documents=[])
 
     def add_files(self, paths: list[str]) -> None:
         if not self.state.get("purchase"):
             raise TenderError("Сначала выберите закупку.")
-        self._ingest([Path(p) for p in paths if p and Path(p).is_file()])
+        try:
+            self._ingest([Path(p) for p in paths if p and Path(p).is_file()])
+        except _Cancelled:
+            return
         self._publish("Файлы добавлены.")
 
-    def fetch_from_eis(self, client: ProcurementClient) -> None:
-        purchase = self.state.get("purchase") or {}
+    def fetch_from_eis(self, client: ProcurementClient, gen: int | None = None) -> None:
+        try:
+            gen, state, folder = self._ctx(gen)
+        except _Cancelled:
+            return
+        purchase = state.get("purchase") or {}
         if not purchase.get("url"):
-            raise TenderError("У закупки нет ссылки на ЕИС.")
+            raise TenderError("У закупки нет ссылки на ЕИС. Добавьте файлы кнопкой «Выбрать файлы».")
         self._progress("Скачиваю документы с ЕИС…")
-        downloaded = tender_docs.fetch_eis_documents(client, purchase["url"], self.folder() / "files")
-        self._ingest(downloaded)
-        self._publish(f"Скачано файлов: {len(downloaded)}.")
+        downloaded = tender_docs.fetch_eis_documents(client, purchase["url"], folder / "files")
+        errors = list(getattr(downloaded, "errors", []))
+        self._commit(gen, download_errors=errors)
+        self._ingest(list(downloaded), gen)
+        tail = f" Не скачались: {len(errors)} — {errors[0]}" if errors else ""
+        self._publish(f"Скачано файлов: {len(downloaded)}.{tail}")
 
     def clear_files(self) -> None:
         with self._lock:
             shutil.rmtree(self.folder() / "files", ignore_errors=True)
             self._text_path().unlink(missing_ok=True)
-            self.state.update(files=[], text_chars=0, analysis=None, matches=[], documents=[], estimate=None, totals=None, steps={})
+            self.state.update(files=[], text_chars=0, analysis=None, matches=[], documents=[], estimate=None, totals=None,
+                              steps={}, download_errors=[])
             self._save()
         self._publish("Файлы очищены.")
 
     # ---------- ИИ ----------
-    def analyze(self) -> None:
-        if not self._text_path().exists() or not self.state.get("text_chars"):
+    def analyze(self, gen: int | None = None) -> None:
+        gen, state, folder = self._ctx(gen)
+        path = self._text_path(folder)
+        if not path.exists() or not state.get("text_chars"):
             raise TenderError("Нет текста ТЗ. Скачайте документы с ЕИС или выберите файлы.")
-        text = self._text_path().read_text(encoding="utf-8")
-        result = tender_ai.analyze_tz(LLM(self._config), text, on_progress=self._progress)
-        with self._lock:
-            self.state["analysis"] = result
-            self.state["matches"] = []
-            self.state["estimate"] = None
-            self.state["totals"] = None
-            self._save()
+        text = path.read_text(encoding="utf-8")
+        result = tender_ai.analyze_tz(LLM(self._config), text, on_progress=self._progress_for(gen))
+        self._commit(gen, analysis=result, matches=[], estimate=None, totals=None)
         count = len(result.get("positions") or [])
         note = " Документ длинный — разобраны первые части." if result.get("truncated") else ""
+        if result.get("failed_parts"):
+            note += f" Не разобрано частей: {result['failed_parts']} (сбой ИИ)."
         self._publish(f"ТЗ разобрано: позиций {count}.{note}")
 
-    def match(self) -> None:
-        analysis = self.state.get("analysis")
+    def match(self, gen: int | None = None) -> None:
+        gen, state, _ = self._ctx(gen)
+        analysis = state.get("analysis")
         if not analysis:
             raise TenderError("Сначала разберите ТЗ.")
         catalog = load_catalog()
-        matches = tender_ai.match_equipment(LLM(self._config), analysis, catalog, on_progress=self._progress)
-        with self._lock:
-            self.state["matches"] = matches
-            self._save()
+        matches = tender_ai.match_equipment(LLM(self._config), analysis, catalog, on_progress=self._progress_for(gen))
+        self._commit(gen, matches=matches)
         source = f"из каталога ({len(catalog)} поз.)" if catalog else "по знаниям ИИ — обязательно проверьте"
         self._publish(f"Оборудование подобрано {source}.")
 
+    def estimate(self, gen: int | None = None) -> None:
+        from .analyst import estimate_costs
+
+        gen, state, _ = self._ctx(gen)
+        if not state.get("analysis"):
+            raise TenderError("Сначала разберите ТЗ.")
+        self._progress("Считаю себестоимость и маржу…")
+        estimate, totals = estimate_costs(LLM(self._config), dict(state["purchase"] or {}), state["analysis"])
+        self._commit(gen, estimate=estimate, totals=totals)
+
     # ---------- документы ----------
-    def build_documents(self) -> None:
-        purchase = self.state.get("purchase") or {}
-        analysis = self.state.get("analysis") or {}
-        matches = self.state.get("matches") or []
+    def build_documents(self, gen: int | None = None) -> None:
+        gen, state, out = self._ctx(gen)
+        purchase = state.get("purchase") or {}
+        analysis = state.get("analysis") or {}
+        matches = state.get("matches") or []
         if not analysis:
             raise TenderError("Сначала разберите ТЗ.")
         company = self._config.get("company", {}) or {}
-        out = self.folder()
         self._progress("Формирую документы…")
         made = [doc_builder.build_checklist(out / "Сводка ТЗ и чек-лист.docx", purchase, analysis, matches)]
         if matches:
             made.append(doc_builder.build_offer(out / "Предложение участника.docx", purchase, analysis, matches, company))
             made.append(doc_builder.build_commercial(out / "Коммерческое предложение.docx", purchase, matches, company))
-        with self._lock:
-            self.state["documents"] = [str(p) for p in made]
-            self._save()
+        self._commit(gen, documents=[str(p) for p in made])
         hint = "" if matches else " Подберите оборудование, чтобы получить предложение участника и КП."
         self._publish(f"Готово документов: {len(made)}.{hint}")
 
@@ -221,100 +284,161 @@ class TenderWorkspace:
         "estimate": "Стоимость и маржа", "docs": "Документы заявки",
     }
 
-    def _step(self, name: str, status: str, note: str = "") -> None:
+    def _step(self, name: str, status: str, note: str = "", gen: int | None = None) -> None:
         with self._lock:
+            if gen is not None and gen != self._gen:
+                raise _Cancelled()
             self.state.setdefault("steps", {})[name] = {"status": status, "note": note}
             self._save()
         self._publish(f"{self.STEP_TITLES[name]}: {note}" if note else "", busy=status == "running")
 
+    @staticmethod
+    def _error_text(exc: Exception) -> str:
+        text = " ".join(str(exc).split())
+        return text or f"неожиданная ошибка ({exc.__class__.__name__})"
+
+    def _files_note(self, state: dict[str, Any]) -> str:
+        files = state.get("files") or []
+        top = [f for f in files if "_zip" not in str(Path(f.get("path", "")).parent.name)]
+        with_text = sum(1 for f in files if f.get("chars"))
+        bad = [f for f in files if f.get("kind") == "error" or str(f.get("status", "")).startswith("ошибка")]
+        note = f"{len(top)} {_plural_files(len(top))}, с текстом: {with_text}"
+        if bad:
+            note += f"; не прочитаны: {len(bad)} ({bad[0]['name']}: {str(bad[0].get('status', '')).removeprefix('ошибка: ')})"
+        errors = state.get("download_errors") or []
+        if errors:
+            note += f"; не скачались: {len(errors)} ({errors[0]})"
+        return note
+
     def run_pipeline(self, client: ProcurementClient, on_report: Callable[[dict[str, Any]], None] | None = None) -> None:
-        """Скачивание → разбор ТЗ → подбор → стоимость → документы. Готовые шаги пропускаются."""
-        my_gen = self._gen
+        """Скачивание → разбор ТЗ → подбор → стоимость → документы. Готовые шаги пропускаются.
+
+        Если во время работы выбрали другую закупку, конвейер останавливается и ничего не пишет в новую заявку.
+        """
+        with self._lock:
+            my_gen = self._gen
         with self._pipeline_lock:
-            if my_gen != self._gen or not self.state.get("purchase"):
-                return
-
-            def alive() -> bool:
-                return my_gen == self._gen
-
-            # 1. документы
-            if not self.state.get("text_chars"):
-                self._step("files", "running", "скачиваю с ЕИС…")
-                try:
-                    self.fetch_from_eis(client)
-                except Exception as exc:
-                    if alive():
-                        self._step("files", "error", f"{exc} Добавьте файлы кнопкой «Выбрать файлы» — разбор продолжится сам.")
-                    return
-                if not self.state.get("text_chars"):
-                    if alive():
-                        self._step("files", "error", "в файлах нет текста (возможно, сканы). Добавьте файлы с текстом.")
-                    return
-            if not alive():
-                return
-            self._step("files", "done", f"{len(self.state.get('files') or [])} файл(ов)")
-            # 2. разбор ТЗ
-            if not self.state.get("analysis"):
-                self._step("analysis", "running", "читаю ТЗ…")
-                try:
-                    self.analyze()
-                except Exception as exc:
-                    if alive():
-                        self._step("analysis", "error", str(exc))
-                    return
-            if not alive():
-                return
-            positions = (self.state.get("analysis") or {}).get("positions") or []
-            self._step("analysis", "done", f"позиций: {len(positions)}")
-            # 3. подбор
-            if positions and not self.state.get("matches"):
-                self._step("match", "running", "подбираю модели…")
-                try:
-                    self.match()
-                except Exception as exc:
-                    if alive():
-                        self._step("match", "error", str(exc))
-            if not alive():
-                return
-            if self.state.get("matches"):
-                self._step("match", "done", f"подобрано: {len(self.state['matches'])}")
-            elif positions:
-                pass
-            else:
-                self._step("match", "skipped", "в ТЗ нет позиций оборудования")
-            # 4. стоимость
-            if not self.state.get("estimate"):
-                self._step("estimate", "running", "считаю себестоимость и маржу…")
-                try:
-                    from .analyst import estimate_costs
-
-                    estimate, totals = estimate_costs(LLM(self._config), self.state["purchase"], self.state["analysis"])
-                    with self._lock:
-                        self.state.update(estimate=estimate, totals=totals)
-                        self._save()
-                except Exception as exc:
-                    if alive():
-                        self._step("estimate", "error", str(exc))
-            if not alive():
-                return
-            if self.state.get("estimate"):
-                self._step("estimate", "done", "готово")
-            # 5. документы Word
-            self._step("docs", "running", "формирую черновики…")
             try:
-                self.build_documents()
-                self._step("docs", "done", f"файлов: {len(self.state.get('documents') or [])}")
+                self._run_steps(my_gen, client, on_report)
+            except _Cancelled:
+                return
+
+    def _run_steps(self, gen: int, client: ProcurementClient, on_report: Callable[[dict[str, Any]], None] | None) -> None:
+        _, state, _ = self._ctx(gen)
+        if not state.get("purchase"):
+            return
+        failed: list[str] = []
+        # 1. документы
+        if not state.get("text_chars"):
+            self._step("files", "running", "скачиваю с ЕИС…", gen)
+            try:
+                self.fetch_from_eis(client, gen)
+            except _Cancelled:
+                raise
             except Exception as exc:
-                if alive():
-                    self._step("docs", "error", str(exc))
-            if on_report and alive() and self.state.get("analysis"):
-                on_report({
-                    "purchase": dict(self.state["purchase"]), "analysis": self.state.get("analysis"),
-                    "estimate": self.state.get("estimate"), "totals": self.state.get("totals"),
-                    "at": datetime.now().isoformat(timespec="seconds"), "error": "",
-                    "source": "заявка",
-                })
+                self._step("files", "error", f"{self._error_text(exc)} Добавьте файлы кнопкой «Выбрать файлы» — разбор продолжится сам.", gen)
+                self._publish("Не удалось получить документы — подробности в шаге «Документы».")
+                return
+            _, state, _ = self._ctx(gen)
+            if not state.get("text_chars"):
+                self._step("files", "error", f"в файлах нет текста (возможно, сканы): {self._files_note(state)}. "
+                                             "Добавьте файлы с текстом кнопкой «Выбрать файлы».", gen)
+                self._publish("В документах нет текста — подробности в шаге «Документы».")
+                return
+        self._step("files", "done", self._files_note(state), gen)
+        # 2. разбор ТЗ
+        _, state, _ = self._ctx(gen)
+        if not state.get("analysis"):
+            self._step("analysis", "running", "читаю ТЗ…", gen)
+            try:
+                self.analyze(gen)
+            except _Cancelled:
+                raise
+            except Exception as exc:
+                self._step("analysis", "error", self._error_text(exc), gen)
+                self._publish("Разбор ТЗ не удался — подробности в шаге «Разбор ТЗ».")
+                return
+        _, state, _ = self._ctx(gen)
+        analysis = state.get("analysis") or {}
+        positions = analysis.get("positions") or []
+        note = f"позиций: {len(positions)}"
+        if analysis.get("failed_parts"):
+            note += f"; не разобрано частей: {analysis['failed_parts']} (сбой ИИ, повторите позже)"
+        if analysis.get("truncated"):
+            note += "; документ длинный — разобраны первые части"
+        if not positions:
+            note += " — в тексте не нашлось позиций оборудования, проверьте, что среди файлов есть ТЗ"
+        self._step("analysis", "done", note, gen)
+        # 3. подбор
+        if not positions:
+            self._step("match", "skipped", "в ТЗ нет позиций оборудования", gen)
+        else:
+            if not state.get("matches"):
+                self._step("match", "running", "подбираю модели…", gen)
+                try:
+                    self.match(gen)
+                except _Cancelled:
+                    raise
+                except Exception as exc:
+                    self._step("match", "error", self._error_text(exc), gen)
+                    failed.append("match")
+            _, state, _ = self._ctx(gen)
+            matches = state.get("matches") or []
+            if matches:
+                found = sum(1 for m in matches if m.get("compliance") != "не найдено")
+                self._step("match", "done", f"подобрано: {found} из {len(matches)}", gen)
+        # 4. стоимость
+        _, state, _ = self._ctx(gen)
+        if not positions and not str(analysis.get("summary") or analysis.get("object") or "").strip():
+            self._step("estimate", "skipped", "нет данных для расчёта: в ТЗ нет позиций", gen)
+        else:
+            if not state.get("estimate"):
+                self._step("estimate", "running", "считаю себестоимость и маржу…", gen)
+                try:
+                    self.estimate(gen)
+                except _Cancelled:
+                    raise
+                except Exception as exc:
+                    self._step("estimate", "error", self._error_text(exc), gen)
+                    failed.append("estimate")
+            _, state, _ = self._ctx(gen)
+            if state.get("estimate"):
+                self._step("estimate", "done", self._estimate_note(state.get("totals") or {}), gen)
+        # 5. документы Word
+        self._step("docs", "running", "формирую черновики…", gen)
+        try:
+            self.build_documents(gen)
+            _, state, _ = self._ctx(gen)
+            self._step("docs", "done", f"файлов: {len(state.get('documents') or [])}", gen)
+        except _Cancelled:
+            raise
+        except Exception as exc:
+            self._step("docs", "error", self._error_text(exc), gen)
+            failed.append("docs")
+        _, state, _ = self._ctx(gen)
+        if on_report and state.get("analysis"):
+            on_report({
+                "purchase": dict(state["purchase"]), "analysis": state.get("analysis"),
+                "estimate": state.get("estimate"), "totals": state.get("totals"),
+                "at": datetime.now().isoformat(timespec="seconds"), "error": "",
+                "source": "заявка",
+            })
+        if failed:
+            names = ", ".join(f"«{self.STEP_TITLES[k]}»" for k in failed)
+            self._publish(f"Готово с ошибками в шагах {names} — причина указана в шаге.")
+        else:
             self._publish("Готово: разбор, подбор, расчёт и документы — ниже.")
+
+    @staticmethod
+    def _estimate_note(totals: dict[str, Any]) -> str:
+        from .procurement import format_money
+
+        if not totals:
+            return "готово"
+        note = f"себестоимость {format_money(totals.get('cost_min'))} – {format_money(totals.get('cost_max'))}"
+        if totals.get("margin_pct_min") is not None:
+            note += f", маржа {totals['margin_pct_min']}…{totals['margin_pct_max']}%"
+        return note
 
     def import_catalog(self, path: str) -> int:
         items = tender_ai.load_catalog_xlsx(Path(path))

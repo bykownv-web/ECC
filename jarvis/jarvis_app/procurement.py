@@ -15,7 +15,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Callable, Iterable
-from urllib.parse import urlencode, urljoin
+from urllib.parse import unquote, urlencode, urljoin
 
 import requests
 from bs4 import BeautifulSoup, Tag
@@ -35,6 +35,94 @@ DELAY_BETWEEN_REQUESTS = 1.5  # секунды, чтобы не перегруж
 
 class ProcurementError(Exception):
     """Понятная пользователю ошибка поиска закупок."""
+
+
+# Признаки страницы-заглушки вместо нужной страницы ЕИС (блокировка, капча, техработы).
+_BLOCK_MARKERS = (
+    ("доступ ограничен", "«Доступ ограничен»"),
+    ("доступ запрещ", "«Доступ запрещён»"),
+    ("access denied", "«Access denied»"),
+    ("не робот", "проверка «я не робот»"),
+    ("captcha", "капча"),
+    ("ddos-guard", "защита DDoS-Guard"),
+    ("servicepipe", "защита ServicePipe"),
+    ("запрос отклон", "«Запрос отклонён»"),
+    ("технических работ", "технические работы"),
+    ("технические работы", "технические работы"),
+    ("403 forbidden", "403 Forbidden"),
+)
+
+
+def blocked_reason(html: str) -> str:
+    """Если ЕИС показала заглушку вместо страницы — короткое описание, иначе пустая строка."""
+    head = (html or "")[:20000].lower()
+    for marker, label in _BLOCK_MARKERS:
+        if marker in head:
+            return label
+    return ""
+
+
+def blocked_message(reason: str) -> str:
+    return (
+        f"ЕИС вместо страницы показала заглушку ({reason}). Обычно это блокировка запросов не из России, через VPN "
+        "или слишком частых запросов. Откройте zakupki.gov.ru в браузере на этом компьютере, при необходимости "
+        "пройдите проверку, отключите VPN и повторите через несколько минут."
+    )
+
+
+def looks_like_html(data: bytes) -> bool:
+    head = (data or b"")[:1024].lstrip(b"\xef\xbb\xbf \t\r\n").lower()
+    return head.startswith((b"<!doctype html", b"<html", b"<head", b"<body", b"<?xml version")) and b"<html" in (data or b"")[:4096].lower()
+
+
+def _decode_header_value(raw: str) -> str:
+    """Имя файла из заголовка: requests отдаёт байты как latin-1; ЕИС шлёт их в UTF-8 или cp1251."""
+    try:
+        data = raw.encode("latin-1")
+    except UnicodeEncodeError:
+        return raw  # уже нормальная строка Unicode
+    for enc in ("utf-8", "cp1251"):
+        try:
+            return data.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw
+
+
+def filename_from_disposition(disposition: str) -> str:
+    """Content-Disposition → имя файла. Понимает filename*=UTF-8''%D0%9F…, кодировку windows-1251 и «сырой» filename."""
+    if not disposition:
+        return ""
+    ext = re.search(r"filename\*\s*=\s*\"?([\w!#$&+.^`|~-]+)'[^']*'([^;\"]+)\"?", disposition, re.I)
+    if ext:
+        charset = ext.group(1).lower()
+        charset = {"utf8": "utf-8", "windows-1251": "cp1251", "win-1251": "cp1251"}.get(charset, charset)
+        try:
+            return unquote(ext.group(2).strip(), encoding=charset, errors="strict")
+        except (LookupError, UnicodeDecodeError):
+            raw = unquote(ext.group(2).strip(), encoding="latin-1")
+            return _decode_header_value(raw)
+    plain = re.search(r'filename\s*=\s*(?:"((?:[^"\\]|\\.)*)"|([^;]+))', disposition, re.I)
+    if not plain:
+        return ""
+    raw = (plain.group(1) if plain.group(1) is not None else plain.group(2) or "").strip()
+    raw = raw.replace('\\"', '"')
+    if re.search(r"%[0-9A-Fa-f]{2}", raw):  # процент-кодирование без filename*
+        try:
+            return unquote(raw, errors="strict")
+        except UnicodeDecodeError:
+            try:
+                return unquote(raw, encoding="cp1251", errors="strict")
+            except UnicodeDecodeError:
+                pass
+    if raw.lower().startswith("=?utf-8?"):  # MIME-кодирование: =?UTF-8?B?...?=
+        from email.header import decode_header, make_header
+
+        try:
+            return str(make_header(decode_header(raw)))
+        except Exception:
+            return raw
+    return _decode_header_value(raw)
 
 
 @dataclass
@@ -179,6 +267,8 @@ def _parse_entry(entry: Tag) -> Purchase | None:
         if key.startswith("заказчик") or key.startswith("организация"):
             customer = _text(node)
             break
+    if not customer:  # у некоторых карточек нет подписи «Заказчик» — берём ссылку на организацию
+        customer = _text(entry.select_one(".registry-entry__body-href a")) or _text(entry.select_one(".registry-entry__body-href"))
 
     price_node = entry.select_one(".price-block__value")
     price_text = _text(price_node)
@@ -267,37 +357,45 @@ class ProcurementClient:
 
     def _get(self, url: str) -> str:
         response = self._request(url)
-        response.encoding = response.encoding or "utf-8"
+        content_type = str(response.headers.get("Content-Type", "")).lower()
+        if "charset" not in content_type:
+            # Без charset requests считает текст latin-1 — кириллица превращается в «Ð¿Ñ€Ð¾…». ЕИС отдаёт UTF-8.
+            response.encoding = "utf-8"
         return response.text
 
     def get_text(self, url: str) -> str:
         return self._get(url)
 
     def get_file(self, url: str) -> tuple[bytes, str]:
-        """Скачивает файл. Возвращает (содержимое, имя файла из заголовка Content-Disposition)."""
-        response = self._request(url)
-        disposition = response.headers.get("Content-Disposition", "")
-        name = ""
-        match = re.search(r"filename\*=(?:UTF-8'')?([^;]+)", disposition, re.I)
-        if match:
-            from urllib.parse import unquote
+        """Скачивает файл. Возвращает (содержимое, имя файла из заголовка Content-Disposition).
 
-            name = unquote(match.group(1).strip('" '))
-        else:
-            match = re.search(r'filename="?([^";]+)"?', disposition, re.I)
-            if match:
-                raw = match.group(1)
-                try:  # ЕИС иногда отдаёт имя в cp1251, прочитанное как latin-1
-                    name = raw.encode("latin-1").decode("utf-8")
-                except (UnicodeEncodeError, UnicodeDecodeError):
-                    try:
-                        name = raw.encode("latin-1").decode("cp1251")
-                    except (UnicodeEncodeError, UnicodeDecodeError):
-                        name = raw
-        return response.content, name
+        Если вместо файла пришла веб-страница (капча, «Доступ ограничен», страница ошибки с кодом 200) —
+        ProcurementError с понятной причиной.
+        """
+        response = self._request(url)
+        name = filename_from_disposition(str(response.headers.get("Content-Disposition", "")))
+        data = response.content or b""
+        content_type = str(response.headers.get("Content-Type", "")).lower()
+        if not name.lower().endswith((".htm", ".html")) and ("text/html" in content_type or looks_like_html(data)):
+            html = data[:20000].decode("utf-8", errors="ignore")
+            reason = blocked_reason(html)
+            if reason:
+                raise ProcurementError(blocked_message(reason))
+            title = re.search(r"<title[^>]*>(.*?)</title>", html, re.I | re.S)
+            hint = f" («{' '.join(title.group(1).split())[:80]}»)" if title and title.group(1).strip() else ""
+            raise ProcurementError(f"вместо файла ЕИС вернула веб-страницу{hint}. Скачайте файл в браузере и добавьте вручную.")
+        if not data:
+            raise ProcurementError("ЕИС вернула пустой файл.")
+        return data, name
 
     def search(self, params: SearchParams) -> list[Purchase]:
-        return parse_results(self._get(build_search_url(params)))
+        html = self._get(build_search_url(params))
+        found = parse_results(html)
+        if not found:
+            reason = blocked_reason(html)
+            if reason:
+                raise ProcurementError(blocked_message(reason))
+        return found
 
     def search_tags(
         self,
@@ -319,8 +417,8 @@ class ProcurementClient:
         """
         merged: dict[str, Purchase] = {}
         errors: list[str] = []
-        off_topic = 0
-        minus_count: dict[str, int] = {}
+        off_topic: set[str] = set()
+        minus_seen: dict[str, str] = {}  # номер → минус-слово (одна закупка считается один раз)
         for tag in [t.strip() for t in tags if t and t.strip()]:
             for page in range(1, max(1, pages_per_tag) + 1):
                 if on_progress:
@@ -342,11 +440,11 @@ class ProcurementClient:
                     break
                 for item in found:
                     if strict and not tag_matches(item.title, tag):
-                        off_topic += 1
+                        off_topic.add(item.number)
                         continue
                     hit = minus_hit(item.title, minus_words or [])
                     if hit:
-                        minus_count[hit] = minus_count.get(hit, 0) + 1
+                        minus_seen.setdefault(item.number, hit)
                         continue
                     existing = merged.get(item.number)
                     if existing is None:
@@ -354,11 +452,15 @@ class ProcurementClient:
                         merged[item.number] = item
                     elif tag not in existing.tags:
                         existing.tags.append(tag)
-                if len(found) < 50:
+                if len(found) < SearchParams.records_per_page:
                     break
         items = list(merged.values())
+        off_topic -= set(merged) | set(minus_seen)  # найдена по другому тегу — не скрыта
         if off_topic:
-            errors.append(f"Скрыто не по теме: {off_topic} (в названии нет слов тега)")
+            errors.append(f"Скрыто не по теме: {len(off_topic)} (в названии нет слов тега)")
+        minus_count: dict[str, int] = {}
+        for hit in minus_seen.values():
+            minus_count[hit] = minus_count.get(hit, 0) + 1
         if minus_count:
             top = ", ".join(f"«{k}» — {v}" for k, v in sorted(minus_count.items(), key=lambda kv: -kv[1])[:5])
             errors.append(f"Скрыто по минус-словам: {sum(minus_count.values())} ({top})")

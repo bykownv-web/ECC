@@ -34,17 +34,43 @@ def now_text() -> str:
     )
 
 
+def _city_variants(city: str) -> list[str]:
+    """«москве» → «москва», «казани» → «казань»: голосом город часто называют в предложном падеже."""
+    variants = [city]
+    low = city.lower()
+    if len(low) > 3:
+        if low.endswith("е"):
+            variants += [city[:-1] + "а", city[:-1]]
+        elif low.endswith("и"):
+            variants += [city[:-1] + "ь", city[:-1] + "а", city[:-1] + "я"]
+        elif low.endswith("у"):
+            variants += [city[:-1] + "а"]
+    return list(dict.fromkeys(variants))
+
+
+def _num(value) -> float | None:
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def _geocode(city: str) -> dict | None:
+    for name in _city_variants(city)[:4]:
+        geo = requests.get(
+            "https://geocoding-api.open-meteo.com/v1/search",
+            params={"name": name, "count": 1, "language": "ru", "format": "json"},
+            timeout=15,
+        ).json()
+        results = geo.get("results") if isinstance(geo, dict) else None
+        if results and isinstance(results[0], dict) and "latitude" in results[0] and "longitude" in results[0]:
+            return results[0]
+    return None
+
+
 def weather(city: str) -> str:
     city = (city or "").strip() or "Москва"
     try:
-        geo = requests.get(
-            "https://geocoding-api.open-meteo.com/v1/search",
-            params={"name": city, "count": 1, "language": "ru", "format": "json"},
-            timeout=15,
-        ).json()
-        if not geo.get("results"):
+        place = _geocode(city)
+        if place is None:
             return f"Не нашёл город «{city}»."
-        place = geo["results"][0]
         data = requests.get(
             "https://api.open-meteo.com/v1/forecast",
             params={
@@ -58,17 +84,21 @@ def weather(city: str) -> str:
             },
             timeout=15,
         ).json()
-    except (requests.RequestException, ValueError, KeyError):
+    except (requests.RequestException, ValueError, KeyError, TypeError, AttributeError, IndexError):
         return "Сервис погоды сейчас недоступен."
-    current = data.get("current", {})
-    daily = data.get("daily", {})
-    description = WEATHER_CODES.get(current.get("weather_code"), "")
-    temp = current.get("temperature_2m")
-    feels = current.get("apparent_temperature")
-    wind = current.get("wind_speed_10m")
-    tmax = (daily.get("temperature_2m_max") or [None])[0]
-    tmin = (daily.get("temperature_2m_min") or [None])[0]
-    parts = [f"В городе {place.get('name', city)} сейчас {temp:+.0f}°" if temp is not None else f"Погода в {city}"]
+    if not isinstance(data, dict) or data.get("error") or not isinstance(data.get("current"), dict):
+        return "Сервис погоды сейчас недоступен."
+    current = data["current"]
+    daily = data.get("daily") if isinstance(data.get("daily"), dict) else {}
+    code = _num(current.get("weather_code"))
+    description = WEATHER_CODES.get(int(code), "") if code is not None else ""
+    temp = _num(current.get("temperature_2m"))
+    feels = _num(current.get("apparent_temperature"))
+    wind = _num(current.get("wind_speed_10m"))
+    tmax = _num((daily.get("temperature_2m_max") or [None])[0])
+    tmin = _num((daily.get("temperature_2m_min") or [None])[0])
+    name = place.get("name") or city
+    parts = [f"В городе {name} сейчас {temp:+.0f}°" if temp is not None else f"Погода: {name}"]
     if description:
         parts.append(description)
     if feels is not None:
@@ -95,9 +125,13 @@ class ReminderManager:
         self._lock = threading.Lock()
 
     def add(self, text: str, minutes: float) -> str:
-        minutes = float(minutes)
-        if minutes <= 0 or minutes > 60 * 24 * 7:
-            raise ValueError("Напоминание можно поставить от 1 минуты до 7 дней.")
+        try:
+            minutes = float(minutes)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Через сколько минут напомнить? Назовите число.") from exc
+        if not (0 < minutes <= 60 * 24 * 7):  # заодно отсекает NaN
+            raise ValueError("Напоминание можно поставить от 1 секунды до 7 дней.")
+        text = str(text or "")
         rid = uuid.uuid4().hex[:8]
         timer = threading.Timer(minutes * 60, self._fire, args=(rid,))
         timer.daemon = True
@@ -105,13 +139,19 @@ class ReminderManager:
         with self._lock:
             self._items[rid] = Reminder(rid, text.strip() or "Время вышло", due, timer)
         timer.start()
-        return f"Напомню в {due:%H:%M}: {text.strip() or 'время вышло'}."
+        when = f"в {due:%H:%M}" if due.date() == datetime.now().date() else f"{due:%d.%m} в {due:%H:%M}"
+        return f"Напомню {when}: {text.strip() or 'время вышло'}."
 
     def _fire(self, rid: str) -> None:
         with self._lock:
             item = self._items.pop(rid, None)
         if item is not None:
-            self._on_fire(item.text)
+            try:
+                self._on_fire(item.text)
+            except Exception:  # поток таймера: исключение не должно пропасть молча
+                import traceback
+
+                traceback.print_exc()
 
     def list(self) -> list[dict[str, str]]:
         with self._lock:

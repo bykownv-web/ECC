@@ -23,6 +23,7 @@ from typing import Callable
 
 IS_WINDOWS = platform.system() == "Windows"
 CREATE_NO_WINDOW = 0x08000000
+LISTEN_RETRY_SEC = 5  # пауза фонового прослушивания после ошибки микрофона
 
 VOICES = {
     "elevenlabs": "ElevenLabs (нужен ключ ElevenLabs)",
@@ -134,11 +135,16 @@ class Speaker:
                 return
             except TTSError as exc:
                 self._report(str(exc))
-            except Exception:
-                pass
+            except ImportError:
+                self._report("Нейросетевой голос недоступен: не установлен пакет edge-tts. Говорю системным голосом.")
+            except Exception as exc:  # не молчим: иначе непонятно, почему голос сменился на системный
+                self._report(f"Голос недоступен ({exc.__class__.__name__}), говорю запасным.")
             if stop.is_set():
                 return  # прервали — не переключаемся на запасной голос
-        self._speak_sapi(text, stop)
+        try:
+            self._speak_sapi(text, stop)
+        except Exception as exc:
+            self._report(f"Озвучка недоступна ({exc.__class__.__name__}).")
 
     def _speak_elevenlabs(self, text: str, stop: threading.Event) -> None:
         import requests
@@ -193,6 +199,8 @@ class Speaker:
                 pass
 
     def _speak_sapi(self, text: str, stop: threading.Event) -> None:
+        if not IS_WINDOWS:
+            return  # системный голос есть только в Windows (creationflags на других ОС — ошибка)
         env = dict(os.environ, JARVIS_TTS_TEXT=text)
         try:
             proc = subprocess.Popen(
@@ -202,7 +210,7 @@ class Speaker:
                 stderr=subprocess.DEVNULL,
                 creationflags=CREATE_NO_WINDOW,
             )
-        except OSError:
+        except (OSError, ValueError):
             return
         with self._lock:
             self._proc = proc
@@ -262,12 +270,17 @@ class Listener:
 
     def listen_once(self, timeout: float = 6, phrase_limit: float = 15) -> str:
         with self._mic_lock:
-            with self._microphone() as source:
-                self._recognizer.adjust_for_ambient_noise(source, duration=0.4)
-                try:
-                    audio = self._recognizer.listen(source, timeout=timeout, phrase_time_limit=phrase_limit)
-                except self._sr.WaitTimeoutError:
-                    return ""
+            microphone = self._microphone()
+            try:
+                with microphone as source:
+                    self._recognizer.adjust_for_ambient_noise(source, duration=0.4)
+                    try:
+                        audio = self._recognizer.listen(source, timeout=timeout, phrase_time_limit=phrase_limit)
+                    except self._sr.WaitTimeoutError:
+                        return ""
+            except (OSError, AttributeError, AssertionError) as exc:
+                # PyAudio падает при открытии потока, если микрофон занят или отключён
+                raise VoiceError("Не удалось открыть микрофон. Проверьте, что он подключён и не занят.") from exc
         return self._recognize(audio)
 
     def start_background(
@@ -291,13 +304,20 @@ class Listener:
                     text = self.listen_once(timeout=5, phrase_limit=12)
                 except VoiceError as exc:
                     on_error(str(exc))
-                    stop.wait(5)
+                    stop.wait(LISTEN_RETRY_SEC)
+                    continue
+                except Exception as exc:  # иначе поток тихо умирает и фоновое прослушивание перестаёт работать
+                    on_error(f"Ошибка микрофона ({exc.__class__.__name__}). Пробую снова.")
+                    stop.wait(LISTEN_RETRY_SEC)
                     continue
                 if stop.is_set() or not text:
                     continue
                 command = extract_after_wake_word(text, wake)
                 if command is not None:
-                    on_command(command)
+                    try:
+                        on_command(command)
+                    except Exception as exc:
+                        on_error(f"Не удалось выполнить команду ({exc.__class__.__name__}).")
 
         threading.Thread(target=loop, name="jarvis-listener", daemon=True).start()
 
@@ -309,12 +329,16 @@ class Listener:
 
 def extract_after_wake_word(text: str, wake_word: str) -> str | None:
     """'Джарвис, который час' -> 'который час'; без слова-активатора -> None."""
-    lowered = text.lower()
-    wake = wake_word.lower().strip()
+    text = text or ""
+    lowered = text.lower().replace("ё", "е")
+    wake = (wake_word or "").lower().replace("ё", "е").strip()
     if not wake:
         return text
     stem = wake[:-1] if len(wake) > 4 else wake  # «джарвис», «джарвиса», «джарвису»
     idx = lowered.find(stem)
+    if idx == -1 and wake == "джарвис":  # распознаватель иногда пишет латиницей
+        stem = "jarvis"
+        idx = lowered.find(stem)
     if idx == -1:
         return None
     rest = text[idx + len(stem):]

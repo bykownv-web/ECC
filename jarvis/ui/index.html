@@ -302,7 +302,7 @@
 
       <!-- Настройки -->
       <div class="tab-body" id="tab-settings">
-        <form id="settings-form" class="settings">
+        <form id="settings-form" class="settings" novalidate>
           <fieldset>
             <legend>ИИ (умный режим)</legend>
             <label for="ai-provider">Кто думает за Джарвиса</label>
@@ -479,7 +479,7 @@
               <button class="btn" type="button" id="tg-connect">Подключить</button>
             </div>
             <div id="tg-code" class="tg-code"></div>
-            <button class="btn btn-primary" type="button" id="tg-open">Открыть бота и привязать</button>
+            <button class="btn btn-primary" type="button" id="tg-open" style="display:none">Открыть бота и привязать</button>
             <div id="tg-health" class="hint"></div>
             <div class="inline">
               <button class="btn btn-ghost" type="button" id="tg-test">Проверить связь</button>

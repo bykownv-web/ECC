@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import functools
+import inspect
 import json
 import subprocess
 import threading
@@ -35,11 +37,12 @@ from .notify import (
 from .procurement import ProcurementError, summary_text
 from .relevance import DEFAULT_MINUS_WORDS
 from .tender import TenderError, TenderWorkspace
-from .tools import ToolBox, ToolError
+from .tools import ToolBox, ToolError, to_bool, to_int, to_number
 from .voice import Listener, Speaker, VoiceError
 
 TOOL_LABELS = {
     "search_procurements": "ищу закупки в ЕИС",
+    "prepare_tender": "разбираю закупку",
     "procurement_analytics": "анализирую закупки",
     "export_procurements": "выгружаю в Excel",
     "open_app": "открываю программу",
@@ -76,6 +79,92 @@ def _log_error(exc: BaseException) -> None:
         pass
 
 
+def _error_text(exc: BaseException) -> str:
+    detail = str(exc).strip()
+    return f"Ошибка: {detail[:300]}" if detail else f"Ошибка: {exc.__class__.__name__}. Подробности в error.log."
+
+
+def _jsonable(value: Any) -> Any:
+    """pywebview отдаёт результат в JS через JSON: Path, set и прочее превращаем в строки заранее."""
+    return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+
+
+def _js_safe(func):
+    """Обёртка публичного метода, который вызывается из JS: ошибка не улетает в окно необработанной.
+
+    Методы, возвращающие словарь, отвечают {"ok": False, "text": …}; остальные показывают ошибку в чате.
+    Сигнатура сохраняется — pywebview читает имена параметров.
+    """
+    returns_dict = str(func.__annotations__.get("return", "")).startswith("dict")
+
+    @functools.wraps(func)
+    def wrapper(self, *args, **kwargs):
+        try:
+            return _jsonable(func(self, *args, **kwargs))
+        except Exception as exc:
+            _log_error(exc)
+            text = _error_text(exc)
+            if returns_dict:
+                return {"ok": False, "text": text}
+            self._emit("error", {"text": text})
+            return None
+
+    wrapper.__signature__ = inspect.signature(func)
+    return wrapper
+
+
+def _js_api(cls):
+    for name, value in list(vars(cls).items()):
+        if not name.startswith("_") and inspect.isfunction(value):
+            setattr(cls, name, _js_safe(value))
+    return cls
+
+
+def _clean_tags(value: Any) -> list[str]:
+    if isinstance(value, str):
+        value = value.split(",")
+    if not isinstance(value, (list, tuple)):
+        return []
+    tags: list[str] = []
+    for item in value:
+        tag = " ".join(str(item).split())[:100] if item is not None else ""
+        if tag and tag.lower() not in (t.lower() for t in tags):
+            tags.append(tag)
+    return tags[:50]
+
+
+def clean_procurement(values: Any) -> dict[str, Any]:
+    """Настройки поиска из окна: только известные ключи и правильные типы."""
+    if not isinstance(values, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for key, value in values.items():
+        if key not in PROCUREMENT_KEYS:
+            continue
+        if key == "tags":
+            out[key] = _clean_tags(value)
+        elif key in ("fz44", "fz223", "only_active", "strict"):
+            out[key] = to_bool(value, True)
+        elif key in ("price_from", "price_to"):
+            number = to_number(value, None)
+            out[key] = number if number and number > 0 else None
+        elif key == "pages_per_tag":
+            out[key] = max(1, min(10, to_int(value, 2)))
+        elif key == "monitor_interval_min":
+            out[key] = max(10, min(24 * 60, to_int(value, 30)))
+        elif key == "minus_words":
+            # None — стандартный список; пустой список — пользователь осознанно убрал все минус-слова
+            if value is None:
+                out[key] = None
+            elif isinstance(value, str):
+                out[key] = [w.strip() for w in value.replace(";", ",").replace("\n", ",").split(",") if w.strip()]
+            elif isinstance(value, (list, tuple)):
+                out[key] = [str(w).strip() for w in value if w is not None and str(w).strip()]
+        elif key == "ca_bundle":
+            out[key] = str(value or "").strip()
+    return out
+
+
 class RemoteToolBox:
     """Инструменты для команд из Telegram: то же, что в окне, кроме опасных действий."""
 
@@ -90,37 +179,53 @@ class RemoteToolBox:
         return self._toolbox.execute(name, args)
 
     def __getattr__(self, item: str):
+        if item == "_toolbox":  # ещё не задан (копирование, pickle) — без бесконечной рекурсии
+            raise AttributeError(item)
         return getattr(self._toolbox, item)
 
 
+@_js_api
 class JarvisApi:
     def __init__(self, config: Config) -> None:
+        # Сначала все поля, потом фоновые потоки: Telegram и мониторинг сразу обращаются к ним.
         self._config = config
         self._window = None
+        self._busy = threading.Event()
+        self._monitor_stop: threading.Event | None = None
+        self._monitor_lock = threading.Lock()
+        self._shortcut_started = False
+        self._listener: Listener | None = None
+        self._voice_error = ""
         self._toolbox = ToolBox(config, self._emit)
+        self._toolbox.on_reminder = self._on_reminder
         self._tender = TenderWorkspace(config, self._emit)
         self._brain = Brain(config, self._toolbox, on_tool=self._on_tool)
         self._speaker = Speaker()
         self._speaker.eleven_key = get_elevenlabs_key
         self._speaker.on_error = lambda text: self._emit("error", {"text": text})
         self._apply_voice_settings()
-        self._busy = threading.Event()
-        self._monitor_stop: threading.Event | None = None
         self._remote_brain = Brain(config, RemoteToolBox(self._toolbox))  # Telegram — отдельная история диалога
         self._telegram = TelegramBot(config, self._on_telegram_message, self._emit)
         self._mailer = Mailer(config)
-        self._notifier = Notifier(self._telegram, self._mailer, config)
+        self._notifier = Notifier(self._telegram, self._mailer, config, on_error=lambda text: self._emit("error", {"text": text}))
         self._analyst = Analyst(config, self._toolbox.procurement_client, self._emit, notify=self._notify_external)
         self._toolbox.tender_runner = self._tender_from_chat
-        self._telegram.start()
-        if config.get("analyst", {}).get("enabled"):
-            self.set_monitoring(True)
         try:
-            self._listener: Listener | None = Listener()
-            self._voice_error = ""
+            self._listener = Listener()
         except VoiceError as exc:
-            self._listener = None
             self._voice_error = str(exc)
+        except Exception as exc:  # сломанный PyAudio/SpeechRecognition не должен мешать запуску окна
+            _log_error(exc)
+            self._voice_error = f"Голосовой ввод недоступен ({exc.__class__.__name__})."
+        self._start_background()
+
+    def _start_background(self) -> None:
+        try:
+            self._telegram.start()
+        except Exception as exc:
+            _log_error(exc)
+        if (self._config.get("analyst", {}) or {}).get("enabled"):
+            self.set_monitoring(True)
 
     # ---------- служебное ----------
     def _attach(self, window) -> None:
@@ -142,30 +247,45 @@ class JarvisApi:
         def wrapper() -> None:
             try:
                 target(*args)
-            except Exception as exc:  # фоновые ошибки не должны ронять окно
+            except Exception as exc:  # фоновые ошибки не должны ронять окно, но и молчать нельзя
                 _log_error(exc)
-                self._emit("error", {"text": f"Ошибка: {exc.__class__.__name__}. Подробности в error.log."})
+                self._emit("error", {"text": _error_text(exc)})
 
         threading.Thread(target=wrapper, daemon=True).start()
 
+    def _on_reminder(self, text: str) -> None:
+        """Напоминание сработало: окно уже получило событие; ещё говорим вслух и пишем в Telegram."""
+        user = str(self._config.get("user_name", "сэр") or "сэр")
+        self._speaker.say(f"{user.capitalize()}, напоминаю: {text}")
+        if self._telegram.chat_id():
+            self._telegram.send(f"⏰ Напоминание: {text}")
+
     # ---------- состояние и настройки ----------
     def get_state(self) -> dict[str, Any]:
+        def safe(fn, default):
+            try:
+                return fn()
+            except Exception as exc:  # одна сломанная часть не должна оставлять окно без настроек
+                _log_error(exc)
+                return default
+
         cfg = self._config.as_dict()
         return {
             "config": cfg,
-            "ai_label": self._ai_label(),
-            "ai_ok": self._brain.has_ai(),
-            "has_key": bool(get_api_key()),
-            "has_eleven_key": bool(get_elevenlabs_key()),
+            "ai_label": safe(self._ai_label, "ИИ: простой режим"),
+            "ai_ok": safe(self._brain.has_ai, False),
+            "has_key": bool(safe(get_api_key, "")),
+            "has_eleven_key": bool(safe(get_elevenlabs_key, "")),
             "has_openai_key": bool(get_secret("openai-compatible-api-key")),
             "has_gigachat_key": bool(get_secret("gigachat-auth-key")),
             "default_minus_words": DEFAULT_MINUS_WORDS,
-            "telegram": self._telegram.status(),
-            "email": self.email_status(),
+            "telegram": safe(self._telegram.status, {}),
+            "email": safe(lambda: {"has_password": bool(get_secret(SMTP_KEY)), "configured": self._mailer.configured()}, {}),
+            "monitoring": self._monitor_stop is not None,
             "voice_available": self._listener is not None,
             "voice_error": self._voice_error,
             "version": __version__,
-            "greeting": self._greeting(),
+            "greeting": safe(self._greeting, "Чем могу помочь?"),
         }
 
     def get_system_stats(self) -> dict[str, Any]:
@@ -241,8 +361,16 @@ class JarvisApi:
         return {"ok": True, "models": models, "text": "Ollama работает. Модели: " + ", ".join(models) + "." + note}
 
     def save_settings(self, values: dict[str, Any]) -> dict[str, Any]:
-        values = values or {}
+        values = values if isinstance(values, dict) else {}
         clean: dict[str, Any] = {k: v for k, v in values.items() if k in SETTINGS_KEYS}
+        if "voice_enabled" in clean:
+            clean["voice_enabled"] = to_bool(clean["voice_enabled"], True)
+        for text_key in SETTINGS_KEYS - {"apps", "voice_enabled"}:
+            if text_key in clean:
+                clean[text_key] = "" if clean[text_key] is None else str(clean[text_key]).strip()[:500]
+        for required in ("assistant_name", "user_name", "wake_word", "city", "ai_provider", "model"):
+            if required in clean and not clean[required]:
+                clean.pop(required)  # пустое имя или слово-активатор ломают работу — оставляем прежнее
         if "ai_provider" in clean and clean["ai_provider"] not in AI_PROVIDERS:
             clean.pop("ai_provider")
         for url_key in ("ollama_url", "openai_base_url"):
@@ -260,15 +388,18 @@ class JarvisApi:
             clean.pop("apps", None)
         company = values.get("company")
         if isinstance(company, dict):
-            clean["company"] = {k: str(v).strip()[:300] for k, v in company.items() if k in COMPANY_KEYS}
-        proc = values.get("procurement")
-        if isinstance(proc, dict):
-            clean["procurement"] = {k: v for k, v in proc.items() if k in PROCUREMENT_KEYS}
+            clean["company"] = {k: ("" if v is None else str(v).strip()[:300]) for k, v in company.items() if k in COMPANY_KEYS}
+        proc = clean_procurement(values.get("procurement"))
+        if proc:
+            clean["procurement"] = proc
+        old_interval = (self._config.get("procurement", {}) or {}).get("monitor_interval_min")
         if "apps" in clean:
             # Список программ заменяется целиком, чтобы удалённые пункты не возвращались.
             self._config.set("apps", clean.pop("apps"))
         self._config.update(clean)
         self._apply_voice_settings()
+        if "monitor_interval_min" in proc and proc["monitor_interval_min"] != old_interval and self._monitor_stop is not None:
+            self.set_monitoring(True)  # новый интервал вступает в силу сразу
         return self.get_state()
 
     def _apply_voice_settings(self) -> None:
@@ -341,20 +472,22 @@ class JarvisApi:
         self._busy.set()
 
         def work() -> None:
+            failed = False
+            text = ""
             try:
                 self._speaker.stop()
                 self._emit("state", {"mode": "listening"})
                 text = self._listener.listen_once()  # type: ignore[union-attr]
             except VoiceError as exc:
                 self._emit("error", {"text": str(exc)})
-                text = ""
+                failed = True
             finally:
                 self._busy.clear()
                 self._emit("state", {"mode": "idle"})
             if text:
                 self._emit("user", {"text": text})
                 self.send_message(text)
-            else:
+            elif not failed:  # об ошибке микрофона уже сказали — «не расслышал» было бы вторым сообщением
                 self._emit("error", {"text": "Не расслышал, повторите, пожалуйста."})
 
         self._run_async(work)
@@ -362,10 +495,10 @@ class JarvisApi:
     def set_wake_listening(self, enabled: bool) -> dict[str, Any]:
         if self._listener is None:
             return {"ok": False, "text": self._voice_error or "Голосовой ввод недоступен."}
-        if not enabled:
+        if not to_bool(enabled, False):
             self._listener.stop_background()
             return {"ok": True, "text": "Фоновое прослушивание выключено."}
-        wake = self._config.get("wake_word", "джарвис")
+        wake = str(self._config.get("wake_word") or "джарвис")
 
         def on_command(command: str) -> None:
             if not command:
@@ -386,7 +519,7 @@ class JarvisApi:
 
     # ---------- закупки ----------
     def search_procurements(self, params: dict[str, Any]) -> None:
-        params = {k: v for k, v in (params or {}).items() if k in PROCUREMENT_KEYS}
+        params = clean_procurement(params)
         if params:
             self._config.update({"procurement": params})
 
@@ -394,7 +527,11 @@ class JarvisApi:
             try:
                 self._toolbox.run_procurement_search()
             except ProcurementError as exc:
-                self._emit("procurement_results", {"items": [], "analytics": None, "errors": [str(exc)]})
+                self._emit("procurement_results", {"items": [], "analytics": None, "errors": [str(exc)], "notes": []})
+            except Exception as exc:  # показываем на вкладке «Закупки», а не только в error.log
+                _log_error(exc)
+                self._emit("procurement_status", {"text": "", "busy": False})
+                self._emit("procurement_results", {"items": [], "analytics": None, "errors": [_error_text(exc)], "notes": []})
 
         self._run_async(work)
 
@@ -405,8 +542,9 @@ class JarvisApi:
             return {"ok": False, "text": str(exc)}
 
     def open_link(self, url: str) -> dict[str, Any]:
-        parsed = urlparse(url or "")
-        if parsed.scheme in ("http", "https") and parsed.netloc.endswith("zakupki.gov.ru"):
+        parsed = urlparse(str(url or "").strip())
+        host = (parsed.hostname or "").lower()
+        if parsed.scheme in ("http", "https") and (host == "zakupki.gov.ru" or host.endswith(".zakupki.gov.ru")):
             import webbrowser
 
             webbrowser.open(parsed._replace(scheme="https").geturl())
@@ -435,10 +573,10 @@ class JarvisApi:
     def tender_set_purchase(self, purchase: dict[str, Any], auto: bool = True) -> dict[str, Any]:
         """Выбор закупки. По умолчанию сразу запускается весь конвейер: документы → ТЗ → подбор → стоимость → Word."""
         try:
-            self._tender.set_purchase(purchase or {})
+            self._tender.set_purchase(purchase if isinstance(purchase, dict) else {})
         except TenderError as exc:
             return {"ok": False, "text": str(exc)}
-        if auto:
+        if to_bool(auto, True):
             self.tender_run_all()
         return {"ok": True}
 
@@ -468,9 +606,15 @@ class JarvisApi:
         return f"Запустил полный разбор закупки {target}: документы, ТЗ, подбор, стоимость и документы заявки.{tail}"
 
     def tender_run_all(self) -> None:
-        self._tender_job(self._tender.run_pipeline, self._toolbox.procurement_client(), self._analyst.upsert_report)
+        # клиент ЕИС создаётся внутри фоновой задачи: его ошибка попадёт в статус заявки, а не в JS
+        self._tender_job(lambda: self._tender.run_pipeline(self._toolbox.procurement_client(), self._analyst.upsert_report))
 
     def tender_find(self, value: str) -> None:
+        value = str(value or "").strip()
+        if not value:
+            self._emit("tender_status", {"text": "Введите номер закупки или ссылку на zakupki.gov.ru.", "busy": False, "error": True})
+            return
+
         def job() -> None:
             self._emit("tender_status", {"text": "Ищу закупку в ЕИС…", "busy": True})
             purchase = self._tender.find_purchase(value, self._toolbox.procurement_client())
@@ -485,7 +629,11 @@ class JarvisApi:
     def _pick_files(self, types: tuple[str, ...], multiple: bool = True) -> list[str]:
         if self._window is None:
             return []
-        import webview
+        try:
+            import webview
+        except ImportError:
+            self._emit("error", {"text": "Окно выбора файлов недоступно: не установлен pywebview."})
+            return []
 
         mode = getattr(getattr(webview, "FileDialog", None), "OPEN", None) or getattr(webview, "OPEN_DIALOG", 10)
         result = self._window.create_file_dialog(mode, allow_multiple=multiple, file_types=types)
@@ -525,7 +673,7 @@ class JarvisApi:
         import os
 
         folder = self._tender.folder().resolve()
-        target = Path(path).resolve() if path else folder
+        target = Path(str(path)).resolve() if path else folder
         if folder != target and folder not in target.parents:
             return {"ok": False, "text": "Можно открыть только файлы заявки."}
         try:
@@ -535,14 +683,15 @@ class JarvisApi:
             return {"ok": False, "text": f"Не удалось открыть: {exc}"}
 
     def set_monitoring(self, enabled: bool) -> dict[str, Any]:
-        if self._monitor_stop is not None:
-            self._monitor_stop.set()
-            self._monitor_stop = None
-        if not enabled:
-            return {"ok": True, "text": "Мониторинг выключен."}
-        stop = threading.Event()
-        self._monitor_stop = stop
-        interval = max(10, int(self._config.get("procurement", {}).get("monitor_interval_min", 30) or 30))
+        with self._monitor_lock:  # двойной клик не должен запустить два цикла
+            if self._monitor_stop is not None:
+                self._monitor_stop.set()
+                self._monitor_stop = None
+            if not to_bool(enabled, False):
+                return {"ok": True, "text": "Мониторинг выключен."}
+            stop = threading.Event()
+            self._monitor_stop = stop
+        interval = max(10, to_int((self._config.get("procurement", {}) or {}).get("monitor_interval_min"), 30))
 
         def loop() -> None:
             first = self._toolbox.seen.is_empty()
@@ -558,15 +707,18 @@ class JarvisApi:
                         if not self._config.get("analyst", {}).get("enabled"):
                             self._notify_external("Новые закупки", summary_text(new, limit=10), email=False)
                     first = False
-                    if self._config.get("analyst", {}).get("enabled") and found:
+                    if (self._config.get("analyst", {}) or {}).get("enabled") and found and not stop.is_set():
                         try:
                             self._analyst.run(found)
-                        except ValueError as exc:
-                            self._emit("analyst_status", {"text": str(exc), "busy": False, "error": True})
+                        except Exception as exc:  # LLMError, ValueError и прочее — показываем на вкладке «Аналитика»
+                            if not isinstance(exc, ValueError):
+                                _log_error(exc)
+                            self._emit("analyst_status", {"text": str(exc) or exc.__class__.__name__, "busy": False, "error": True})
                 except ProcurementError as exc:
                     self._emit("error", {"text": f"Мониторинг: {exc}"})
-                except Exception as exc:
+                except Exception as exc:  # не молчим: иначе мониторинг «работает», но ничего не находит
                     _log_error(exc)
+                    self._emit("error", {"text": f"Мониторинг: {_error_text(exc)}"})
                 stop.wait(interval * 60)
 
         threading.Thread(target=loop, daemon=True, name="jarvis-monitor").start()
@@ -580,11 +732,15 @@ class JarvisApi:
             _log_error(exc)
 
     def _on_telegram_message(self, text: str) -> str:
+        text = str(text or "").strip()
         if text.startswith("/zakupki"):
             try:
                 found, errors = self._toolbox.run_procurement_search()
             except ProcurementError as exc:
                 return f"Поиск не удался: {exc}"
+            except Exception as exc:
+                _log_error(exc)
+                return f"Поиск не удался: {_error_text(exc)}"
             return summary_text(found, limit=10) + ("\n" + "; ".join(errors) if errors else "")
         if text.startswith("/analytics"):
             reports = self._analyst.store.reports[:3]
@@ -601,10 +757,13 @@ class JarvisApi:
 
     def telegram_connect(self, token: str) -> dict[str, Any]:
         try:
-            info = self._telegram.connect(token)
+            info = self._telegram.connect(str(token or ""))
         except TelegramError as exc:
             return {"ok": False, "text": str(exc)}
         bot = f"@{info['bot']}" if info.get("bot") else "вашему боту"
+        if not info.get("code"):
+            name = f" @{info['bot']}" if info.get("bot") else ""
+            return {"ok": True, "code": "", "text": f"Бот{name} подключён, чат уже привязан."}
         return {"ok": True, "code": info["code"], "text": f"Отправьте {bot} сообщение: /start {info['code']}"}
 
     def telegram_open_bot(self) -> dict[str, Any]:
@@ -629,17 +788,23 @@ class JarvisApi:
         return {"ok": ok, "text": "Сообщение отправлено." if ok else "Не удалось отправить."}
 
     def email_save(self, values: dict[str, Any]) -> dict[str, Any]:
-        values = values or {}
-        preset = str(values.get("preset", "custom"))
-        host, port = SMTP_PRESETS.get(preset, (str(values.get("host", "")).strip(), values.get("port") or 465))
-        try:
-            port = int(port)
-        except (TypeError, ValueError):
-            port = 465
+        values = values if isinstance(values, dict) else {}
+        preset = str(values.get("preset") or "custom").strip().lower()
+        if preset in SMTP_PRESETS:
+            host, port = SMTP_PRESETS[preset]
+        else:
+            preset = "custom"
+            host = str(values.get("host") or "").strip()
+            port = to_int(values.get("port"), 465)
+            if not 0 < port < 65536:
+                port = 465
+            if not host:
+                return {"ok": False, "text": "Укажите SMTP-сервер, например smtp.yandex.ru."}
+        login = str(values.get("login") or "").strip()
         self._config.update({"email": {
-            "enabled": bool(values.get("enabled", True)), "preset": preset, "host": host, "port": port,
-            "login": str(values.get("login", "")).strip(), "to": str(values.get("to", "")).strip() or str(values.get("login", "")).strip(),
-            "notify": bool(values.get("notify", True)),
+            "enabled": to_bool(values.get("enabled"), True), "preset": preset, "host": host, "port": port,
+            "login": login, "to": str(values.get("to") or "").strip() or login,
+            "notify": to_bool(values.get("notify"), True),
         }})
         password = str(values.get("password", ""))
         if password and not set_secret(SMTP_KEY, password):
@@ -664,12 +829,12 @@ class JarvisApi:
         return self._analyst.snapshot()
 
     def analyst_save(self, values: dict[str, Any]) -> dict[str, Any]:
-        values = values or {}
+        values = values if isinstance(values, dict) else {}
         clean = {
-            "enabled": bool(values.get("enabled")),
-            "profile": str(values.get("profile", ""))[:3000],
-            "min_score": max(0, min(100, int(values.get("min_score") or 60))),
-            "top_n": max(1, min(10, int(values.get("top_n") or 3))),
+            "enabled": to_bool(values.get("enabled"), False),
+            "profile": str(values.get("profile") or "").strip()[:3000],
+            "min_score": max(0, min(100, to_int(values.get("min_score"), 60))),
+            "top_n": max(1, min(10, to_int(values.get("top_n"), 3) or 3)),
         }
         self._config.update({"analyst": clean})
         if clean["enabled"]:
@@ -695,9 +860,11 @@ class JarvisApi:
         self._run_async(work)
 
     def analyst_to_tender(self, number: str) -> dict[str, Any]:
+        number = str(number or "").strip()
         for report in self._analyst.store.reports:
-            if report["purchase"].get("number") == number:
-                return self.tender_set_purchase(report["purchase"])
+            purchase = report.get("purchase") or {} if isinstance(report, dict) else {}
+            if str(purchase.get("number") or "") == number and number:
+                return self.tender_set_purchase(purchase)
         return {"ok": False, "text": "Отчёт не найден."}
 
     # ---------- ярлык ----------
@@ -711,23 +878,30 @@ class JarvisApi:
         except (OSError, subprocess.SubprocessError) as exc:
             return {"ok": False, "text": f"Не удалось создать ярлык: {exc}"}
 
-    def ensure_shortcut(self) -> None:
-        """Один раз при первом запуске создаёт ярлык на рабочем столе."""
-        if self._config.get("shortcut_created"):
+    def ensure_shortcut(self, *_args) -> None:
+        """Один раз при первом запуске создаёт ярлык на рабочем столе (вызывается на событии loaded окна)."""
+        # loaded приходит при каждой загрузке страницы — не запускаем вторую попытку параллельно и повторно
+        if self._shortcut_started or self._config.get("shortcut_created"):
             return
+        self._shortcut_started = True
 
         def work() -> None:
             res = self.create_shortcut()
-            if res["ok"]:
+            if res.get("ok"):
                 self._emit("toast", {"text": "На рабочем столе создан ярлык J.A.R.V.I.S."})
 
         self._run_async(work)
 
-    def shutdown(self) -> None:
-        self._telegram.stop()
-        if self._monitor_stop is not None:
-            self._monitor_stop.set()
-        if self._listener is not None:
-            self._listener.stop_background()
-        self._speaker.stop()
-        self._toolbox.reminders.cancel_all()
+    def shutdown(self, *_args) -> None:
+        steps = [
+            self._telegram.stop,
+            lambda: self._monitor_stop.set() if self._monitor_stop is not None else None,
+            lambda: self._listener.stop_background() if self._listener is not None else None,
+            self._speaker.stop,
+            self._toolbox.reminders.cancel_all,
+        ]
+        for step in steps:  # одна ошибка не должна мешать остановить остальное
+            try:
+                step()
+            except Exception as exc:
+                _log_error(exc)

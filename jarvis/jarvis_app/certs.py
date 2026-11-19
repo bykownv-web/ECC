@@ -58,7 +58,7 @@ def load_pem(path: Path) -> str:
     data = path.read_bytes()
     blocks = _PEM_RE.findall(data)
     if blocks:
-        return "\n".join(b.decode("ascii") for b in blocks) + "\n"
+        return "\n".join(b.decode("ascii", errors="ignore").replace("\r\n", "\n") for b in blocks) + "\n"
     # DER начинается с ASN.1 SEQUENCE (0x30); иначе это не сертификат
     if not data.startswith(b"\x30"):
         raise ValueError(f"{path.name} не похож на сертификат")
@@ -72,14 +72,21 @@ def build_bundle(paths: list[Path]) -> Path | None:
     extra: list[str] = []
     for path in paths:
         try:
-            extra.append(f"# {path.name}\n" + load_pem(path))
-        except (OSError, ValueError):
+            # имя файла в комментарии — только ASCII: «Минцифры.cer» иначе ломал запись набора (UnicodeEncodeError)
+            label = path.name.encode("ascii", errors="replace").decode("ascii")
+            extra.append(f"# {label}\n" + load_pem(path))
+        except (OSError, ValueError, UnicodeError):
             continue
     if not extra:
         return None
     bundle = app_data_dir() / "ca-bundle-zakupki.pem"
-    base = Path(certifi.where()).read_text(encoding="ascii", errors="ignore")
-    bundle.write_text(base.rstrip() + "\n\n" + "\n".join(extra), encoding="ascii")
+    try:
+        base = Path(certifi.where()).read_text(encoding="ascii", errors="ignore")
+        tmp = bundle.with_name(bundle.name + ".tmp")
+        tmp.write_text(base.rstrip() + "\n\n" + "\n".join(extra), encoding="ascii", errors="replace")
+        tmp.replace(bundle)
+    except OSError:
+        return bundle if bundle.exists() else None
     return bundle
 
 

@@ -69,3 +69,58 @@ def test_wake_word(text, expected):
 )
 def test_tender_commands(text, expected):
     assert parse_command(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("открой закупки", ("open_url", {"url": "https://zakupki.gov.ru"})),
+        ("открой сайт госзакупки", ("open_url", {"url": "https://zakupki.gov.ru"})),
+        ("открой zakupki.gov.ru", ("open_url", {"url": "https://zakupki.gov.ru"})),
+        ("открой ya.ru", ("open_url", {"url": "https://ya.ru"})),
+        ("найди закупки на проекторы", ("search_procurements", {"tags": ["проекторы"]})),
+        ("найди аукционы на проекторы и экраны", ("search_procurements", {"tags": ["проекторы", "экраны"]})),
+        ("найди закупки на поставку проекторов", ("search_procurements", {"tags": ["проекторов"]})),
+        ("найди закупки проектор 44-ФЗ", ("search_procurements", {"tags": ["проектор"], "fz223": False})),
+        ("найди закупки на проекторы до 5 млн", ("search_procurements", {"tags": ["проекторы"], "price_to": 5_000_000})),
+        ("найди закупки на экраны от 300 тысяч", ("search_procurements", {"tags": ["экраны"], "price_from": 300_000})),
+        ("найди закупки по моим тегам", ("search_procurements", {})),
+        ("найди новые закупки за сегодня", ("search_procurements", {})),
+        ("найди время работы магазина", ("web_search", {"query": "время работы магазина"})),
+        ("время", ("get_time", {})),
+        ("какое сегодня число", ("get_time", {})),
+        ("какая погода в москве завтра", ("get_weather", {"city": "москве"})),
+        ("позвони 89161234567", None),
+        ("закупка 32312345678", ("prepare_tender", {"number": "32312345678"})),
+        ("пауза", ("media_control", {"action": "play_pause"})),
+        ("открой google play", ("open_app", {"name": "google play"})),
+    ],
+)
+def test_ambiguous_phrases(text, expected):
+    assert parse_command(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text,minutes,reminder",
+    [
+        ("напомни через 10 минут проверить закупки", 10, "проверить закупки"),  # не поиск закупок
+        ("напомни через 5 минут позвонить 89161234567", 5, "позвонить 89161234567"),  # не номер закупки
+        ("напомни через 10 минут что время обеда", 10, "что время обеда"),  # не «который час»
+        ("напомни позвонить маме через 10 минут", 10, "позвонить маме"),
+        ("поставь таймер на двадцать пять минут", 25, "время вышло"),
+        ("таймер на пять минут", 5, "время вышло"),
+        ("напомни через 2 часа 30 минут обед", 150, "обед"),
+        ("напомни через полтора часа выйти", 90, "выйти"),
+        ("напомни через час про отчёт", 60, "про отчет"),
+        ("напомни через минуту", 1, "время вышло"),
+        ("напомни через 30 секунд", 0.5, "время вышло"),
+        ("напомни купить 2 молока через 10 минут", 10, "купить 2 молока"),
+    ],
+)
+def test_reminders_with_numbers_inside(text, minutes, reminder):
+    assert parse_command(text) == ("set_reminder", {"text": reminder, "minutes": minutes})
+
+
+def test_wake_word_latin_and_yo():
+    assert extract_after_wake_word("Jarvis, открой блокнот", "джарвис") == "открой блокнот"
+    assert extract_after_wake_word("Джарвис ещё громче", "джарвис") == "ещё громче"

@@ -11,7 +11,7 @@ import json
 import re
 from typing import Any, Callable
 
-from .llm import LLM
+from .llm import LLM, LLMError, normalize
 
 CHUNK_CHARS = 12000
 MAX_CHUNKS = 12
@@ -127,11 +127,24 @@ def chunk_text(text: str, size: int = CHUNK_CHARS) -> list[str]:
         length += len(para) + 1
     if current and "".join(current).strip():
         chunks.append("\n".join(current))
-    return chunks
+    return [c for c in chunks if c.strip()]
 
 
-def _norm(value: str) -> str:
-    return re.sub(r"\s+", " ", (value or "").lower()).strip()
+def _norm(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value if value is not None else "").lower()).strip()
+
+
+def _s(value: Any) -> str:
+    """Значение поля как строка: GigaChat иногда присылает числа, списки или null вместо строки."""
+    if value is None:
+        return ""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    if isinstance(value, list):
+        return "; ".join(x for x in (_s(v) for v in value) if x)
+    if isinstance(value, dict):
+        return "; ".join(f"{k}: {_s(v)}" for k, v in value.items() if _s(v))
+    return str(value).strip()
 
 
 def merge_analyses(parts: list[dict[str, Any]]) -> dict[str, Any]:
@@ -141,38 +154,54 @@ def merge_analyses(parts: list[dict[str, Any]]) -> dict[str, Any]:
     merged["positions"] = []
     seen_positions: dict[str, dict[str, Any]] = {}
     for part in parts:
+        if not isinstance(part, dict):
+            continue
         for key in list(merged):
             if key == "positions":
                 continue
             value = part.get(key)
             if isinstance(merged[key], list):
-                for item in value or []:
-                    if isinstance(item, str) and item.strip() and _norm(item) not in {_norm(x) for x in merged[key]}:
-                        merged[key].append(item.strip())
-            elif isinstance(value, str) and value.strip() and not merged[key]:
-                merged[key] = value.strip()
-        for pos in part.get("positions") or []:
-            if not isinstance(pos, dict) or not str(pos.get("name", "")).strip():
+                values = value if isinstance(value, list) else ([value] if value else [])
+                for item in values:
+                    text = _s(item)
+                    if text and _norm(text) not in {_norm(x) for x in merged[key]}:
+                        merged[key].append(text)
+            else:
+                text = _s(value)
+                if text and not merged[key]:
+                    merged[key] = text
+        positions = part.get("positions")
+        for pos in positions if isinstance(positions, list) else []:
+            if not isinstance(pos, dict) or not _s(pos.get("name")):
                 continue
-            key = _norm(pos["name"])
-            chars = [c for c in pos.get("characteristics") or [] if isinstance(c, dict) and c.get("name")]
+            key = _norm(_s(pos["name"]))
+            raw_chars = pos.get("characteristics")
+            chars = [
+                {"name": _s(c.get("name")), "requirement": _s(c.get("requirement"))}
+                for c in (raw_chars if isinstance(raw_chars, list) else [])
+                if isinstance(c, dict) and _s(c.get("name"))
+            ]
             if key in seen_positions:
                 existing = seen_positions[key]
                 names = {_norm(c["name"]) for c in existing["characteristics"]}
-                existing["characteristics"].extend(c for c in chars if _norm(c["name"]) not in names)
+                for c in chars:
+                    if _norm(c["name"]) not in names:
+                        existing["characteristics"].append(c)
+                        names.add(_norm(c["name"]))
                 for field in ("quantity", "unit", "okpd2"):
-                    if not existing.get(field) and pos.get(field):
-                        existing[field] = pos[field]
+                    if not existing.get(field) and _s(pos.get(field)):
+                        existing[field] = _s(pos.get(field))
             else:
+                unique_chars: list[dict[str, str]] = []
+                for c in chars:
+                    if _norm(c["name"]) not in {_norm(x["name"]) for x in unique_chars}:
+                        unique_chars.append(c)
                 item = {
-                    "name": str(pos["name"]).strip(),
-                    "quantity": str(pos.get("quantity", "")).strip(),
-                    "unit": str(pos.get("unit", "")).strip(),
-                    "okpd2": str(pos.get("okpd2", "")).strip(),
-                    "characteristics": [
-                        {"name": str(c["name"]).strip(), "requirement": str(c.get("requirement", "")).strip()}
-                        for c in chars
-                    ],
+                    "name": _s(pos["name"]),
+                    "quantity": _s(pos.get("quantity")),
+                    "unit": _s(pos.get("unit")),
+                    "okpd2": _s(pos.get("okpd2")),
+                    "characteristics": unique_chars,
                 }
                 seen_positions[key] = item
                 merged["positions"].append(item)
@@ -180,19 +209,34 @@ def merge_analyses(parts: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def analyze_tz(llm: LLM, text: str, on_progress: Callable[[str], None] | None = None) -> dict[str, Any]:
-    size = getattr(llm, "chunk_chars", CHUNK_CHARS)
-    chunks = chunk_text(text, size=size)
-    if not chunks:
+    """Разбор ТЗ по частям. Если часть не разобралась (сбой ИИ) — остальные всё равно идут в итог.
+
+    Ошибка — только когда не разобралась ни одна часть. failed_parts — сколько частей пропущено.
+    """
+    size = int(getattr(llm, "chunk_chars", CHUNK_CHARS) or CHUNK_CHARS)
+    all_chunks = chunk_text(text or "", size=size)
+    if not all_chunks:
         raise ValueError("В документах нет текста для разбора.")
-    if len(chunks) > MAX_CHUNKS:
-        chunks = chunks[:MAX_CHUNKS]
-    parts = []
+    chunks = all_chunks[:MAX_CHUNKS]
+    parts: list[dict[str, Any]] = []
+    failures: list[str] = []
+    first_error: Exception | None = None
     for i, chunk in enumerate(chunks, start=1):
         if on_progress:
             on_progress(f"Разбираю ТЗ: часть {i} из {len(chunks)}…")
-        parts.append(llm.json(ANALYSIS_SYSTEM, f"Фрагмент документации ({i}/{len(chunks)}):\n\n{chunk}", ANALYSIS_SCHEMA))
+        try:
+            data = llm.json(ANALYSIS_SYSTEM, f"Фрагмент документации ({i}/{len(chunks)}):\n\n{chunk}", ANALYSIS_SCHEMA)
+        except LLMError as exc:
+            first_error = first_error or exc
+            failures.append(f"часть {i}: {exc}")
+            continue
+        parts.append(normalize(ANALYSIS_SCHEMA, data))
+    if not parts:
+        raise first_error or LLMError("ИИ не разобрал ни одной части ТЗ.")
     result = merge_analyses(parts)
-    result["truncated"] = len(chunk_text(text, size=size)) > MAX_CHUNKS
+    result["truncated"] = len(all_chunks) > MAX_CHUNKS
+    result["failed_parts"] = len(failures)
+    result["errors"] = failures
     return result
 
 
@@ -200,6 +244,7 @@ def analyze_tz(llm: LLM, text: str, on_progress: Callable[[str], None] | None = 
 def _catalog_candidates(position: dict[str, Any], catalog: list[dict[str, Any]], limit: int = 40) -> list[dict[str, Any]]:
     """Грубый отбор записей каталога по совпадению слов, чтобы не отправлять ИИ весь прайс."""
     words = {w for w in re.findall(r"[a-zа-яё0-9]{3,}", _norm(position.get("name", ""))) if len(w) > 2}
+    catalog = [c for c in catalog if isinstance(c, dict)]
     scored = []
     for item in catalog:
         hay = _norm(" ".join(str(item.get(k, "")) for k in ("name", "category", "brand", "model", "specs")))
@@ -219,48 +264,66 @@ def match_equipment(
     positions = analysis.get("positions") or []
     if not positions:
         raise ValueError("В ТЗ не найдено позиций оборудования. Сначала разберите ТЗ.")
-    catalog = catalog or []
-    by_id = {str(item["id"]): item for item in catalog}
+    catalog = [c for c in catalog or [] if isinstance(c, dict)]
+    by_id = {str(item.get("id", i + 1)): item for i, item in enumerate(catalog)}
     results: list[dict[str, Any]] = []
+    failures = 0
+    first_error: Exception | None = None
     for index, position in enumerate(positions):
+        if not isinstance(position, dict):
+            continue
+        name = _s(position.get("name")) or f"Позиция {index + 1}"
         if on_progress:
-            on_progress(f"Подбираю: {position['name'][:60]} ({index + 1} из {len(positions)})…")
+            on_progress(f"Подбираю: {name[:60]} ({index + 1} из {len(positions)})…")
         payload = {"position_index": index, "position": position}
-        if catalog:
-            candidates = _catalog_candidates(position, catalog)
-            prompt = (
-                "Требования заказчика:\n" + json.dumps(payload, ensure_ascii=False, indent=1)
-                + "\n\nКаталог поставщика (выбирай только отсюда):\n"
-                + json.dumps(candidates, ensure_ascii=False, indent=1)
-            )
-            data = llm.json(MATCH_SYSTEM_CATALOG, prompt, MATCH_SCHEMA)
-        else:
-            prompt = "Требования заказчика:\n" + json.dumps(payload, ensure_ascii=False, indent=1)
-            data = llm.json(MATCH_SYSTEM_FREE, prompt, MATCH_SCHEMA)
-        match = next((m for m in data.get("matches") or [] if isinstance(m, dict)), None) or {}
+        try:
+            if catalog:
+                candidates = _catalog_candidates(position, catalog)
+                prompt = (
+                    "Требования заказчика:\n" + json.dumps(payload, ensure_ascii=False, indent=1)
+                    + "\n\nКаталог поставщика (выбирай только отсюда):\n"
+                    + json.dumps(candidates, ensure_ascii=False, indent=1)
+                )
+                data = llm.json(MATCH_SYSTEM_CATALOG, prompt, MATCH_SCHEMA)
+            else:
+                prompt = "Требования заказчика:\n" + json.dumps(payload, ensure_ascii=False, indent=1)
+                data = llm.json(MATCH_SYSTEM_FREE, prompt, MATCH_SCHEMA)
+            error_note = ""
+        except LLMError as exc:  # сбой на одной позиции не отменяет подбор остальных
+            failures += 1
+            first_error = first_error or exc
+            data, error_note = {}, f"ИИ не ответил: {exc}"
+        data = normalize(MATCH_SCHEMA, data if isinstance(data, dict) else {})
+        found = [m for m in data.get("matches") or [] if isinstance(m, dict)]
+        match = next((m for m in found if m.get("position_index") == index), None) or (found[0] if found else {})
         item = {
             "position_index": index,
-            "position": position["name"],
-            "quantity": position.get("quantity", ""),
-            "unit": position.get("unit", ""),
-            "brand": str(match.get("brand", "")),
-            "model": str(match.get("model", "")),
-            "country": str(match.get("country", "")),
+            "position": name,
+            "quantity": _s(position.get("quantity")),
+            "unit": _s(position.get("unit")),
+            "brand": _s(match.get("brand")),
+            "model": _s(match.get("model")),
+            "country": _s(match.get("country")),
             "compliance": match.get("compliance") or "не найдено",
-            "price": str(match.get("price", "")),
-            "offered_values": [v for v in match.get("offered_values") or [] if isinstance(v, dict)],
-            "notes": str(match.get("notes", "")),
+            "price": _s(match.get("price")),
+            "offered_values": [
+                {"name": _s(v.get("name")), "value": _s(v.get("value"))}
+                for v in match.get("offered_values") or [] if isinstance(v, dict)
+            ],
+            "notes": (_s(match.get("notes")) + (" " + error_note if error_note else "")).strip(),
             "from_catalog": False,
         }
+        if item["compliance"] not in ("соответствует", "частично", "не найдено"):
+            item["compliance"] = "частично" if item["model"] else "не найдено"
         catalog_id = str(match.get("catalog_id", "")).strip()
         if catalog and catalog_id in by_id:
             # Данные модели берём из каталога, а не из ответа ИИ, чтобы не было выдуманных моделей и цен.
             src = by_id[catalog_id]
             item.update(
-                brand=src.get("brand", "") or item["brand"],
-                model=src.get("model", "") or src.get("name", ""),
-                country=src.get("country", "") or item["country"],
-                price=str(src.get("price", "")) or item["price"],
+                brand=_s(src.get("brand")) or item["brand"],
+                model=_s(src.get("model")) or _s(src.get("name")),
+                country=_s(src.get("country")) or item["country"],
+                price=_s(src.get("price")) or item["price"],
                 from_catalog=True,
             )
         elif catalog:
@@ -269,6 +332,8 @@ def match_equipment(
         else:
             item["notes"] = ("Проверить по спецификации производителя. " + item["notes"]).strip()
         results.append(item)
+    if results and failures == len(results) and first_error is not None:
+        raise first_error  # ИИ не ответил ни разу — показываем причину, а не пустой подбор
     return results
 
 
