@@ -64,6 +64,7 @@ class FakePipe:
     def __call__(self, **kwargs):
         steps = kwargs["num_inference_steps"]
         self.log.append(("call", steps))
+        self.last_kwargs = kwargs
         if FakePipe.oom:
             raise FakeOOM("CUDA out of memory")
         # mimics the diffusers denoising loop: callback after each step, honour _interrupt
@@ -118,7 +119,9 @@ def fake_modules(monkeypatch):
             return self
 
     torch = types.ModuleType("torch")
-    torch.float16, torch.float32 = "fp16", "fp32"
+    torch.float16, torch.float32, torch.bfloat16 = "fp16", "fp32", "bf16"
+    torch.device = lambda name: name
+    torch.bf16 = True
     torch.Generator = Gen
     cache_clears = []
     torch.vram_bytes = 24 * 2**30
@@ -127,6 +130,7 @@ def fake_modules(monkeypatch):
         empty_cache=lambda: cache_clears.append(1),
         is_available=lambda: False,
         get_device_properties=lambda index: types.SimpleNamespace(total_memory=torch.vram_bytes),
+        is_bf16_supported=lambda including_emulation=True: torch.bf16,
         OutOfMemoryError=FakeOOM,
     )
 

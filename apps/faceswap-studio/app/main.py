@@ -25,6 +25,15 @@ from .backends import (
 )
 from .config import Settings
 from .jobs import ERROR, Job, JobContext, JobError, JobManager, ProgressFn
+from .model_arch import (
+    LABELS,
+    SIZE_MULTIPLE,
+    UNKNOWN,
+    defaults_for,
+    detect_lora_architecture,
+    guess_repo_architecture,
+    inspect_checkpoint,
+)
 from .registry import list_models, resolve_model
 from .safety import (
     ContentBlocked,
@@ -52,8 +61,9 @@ class GenerateRequest(BaseModel):
     negative_prompt: str = Field(default="", max_length=1000)
     width: int = Field(default=1024, ge=256, le=2048)
     height: int = Field(default=1024, ge=256, le=2048)
+    # None = the default of the model's architecture (GET /api/models -> defaults)
     steps: int | None = Field(default=None, ge=1)
-    guidance: float = Field(default=7.0, ge=0.0, le=20.0)
+    guidance: float | None = Field(default=None, ge=0.0, le=20.0)
     seed: int | None = Field(default=None, ge=0, le=2**32 - 1)
     # File name from /api/models -> checkpoints; empty = default model
     model: str | None = Field(default=None, max_length=255)
@@ -119,9 +129,23 @@ def create_app(settings: Settings | None = None, backends: Backends | None = Non
 
     # ------------------------------------------------------------------ helpers
 
-    def snap(value: int) -> int:
-        """Clamp to max_side and round down to a multiple of 8 (diffusers requirement)."""
-        return max(256, min(value, settings.max_side)) // 8 * 8
+    def snap(value: int, multiple: int = 8) -> int:
+        """Clamp to max_side, round down to a multiple of 8 (16 for Z-Image): diffusers requirement."""
+        return max(256, min(value, settings.max_side)) // multiple * multiple
+
+    def default_architecture() -> str | None:
+        if backends.name == "mock":
+            return None
+        return guess_repo_architecture(settings.model_id)
+
+    def model_entry(item: dict, architecture: str | None) -> dict:
+        arch = architecture if architecture and architecture != UNKNOWN else None
+        return {
+            **item,
+            "architecture": arch or UNKNOWN,
+            "label": LABELS.get(arch or ""),
+            "defaults": defaults_for(arch, settings.default_steps),
+        }
 
     def save(img: Image.Image, kind: str, prompt: str | None = None) -> str:
         nsfw.check(img)
@@ -150,17 +174,31 @@ def create_app(settings: Settings | None = None, backends: Backends | None = Non
             if path is None:
                 raise HTTPException(400, f"LoRA не найдена: {spec.name}")
             loras.append((path, spec.weight))
-        steps = min(req.steps or settings.default_steps, settings.max_steps)
+        arch = inspect_checkpoint(checkpoint).architecture if checkpoint else default_architecture()
+        known = arch if arch and arch != UNKNOWN else None
+        if known:
+            for path, _ in loras:
+                lora_arch = detect_lora_architecture(path)
+                if lora_arch != UNKNOWN and lora_arch != known:
+                    raise HTTPException(
+                        400,
+                        f"LoRA {path.name} обучена для {LABELS[lora_arch]}, а выбранная модель — "
+                        f"{LABELS[known]}. Нужна LoRA для той же базы.",
+                    )
+        defaults = defaults_for(known, settings.default_steps)
+        steps = min(req.steps or defaults["steps"], settings.max_steps)
+        multiple = SIZE_MULTIPLE.get(known or "", 8)
         return GenerateParams(
             prompt=req.prompt,
             negative_prompt=req.negative_prompt,
-            width=snap(req.width),
-            height=snap(req.height),
+            width=snap(req.width, multiple),
+            height=snap(req.height, multiple),
             steps=steps,
-            guidance=req.guidance,
+            guidance=defaults["guidance"] if req.guidance is None else req.guidance,
             seed=req.seed,
             checkpoint=checkpoint,
             loras=tuple(loras),
+            architecture=known if checkpoint else None,
         )
 
     def run_generator(params: GenerateParams, progress: ProgressFn) -> tuple[Image.Image, int]:
@@ -223,16 +261,26 @@ def create_app(settings: Settings | None = None, backends: Backends | None = Non
             "watermark": settings.watermark,
             "lowvram": settings.lowvram,
             "lowvram_active": getattr(backends.generator, "lowvram_active", None),
-            # Architecture of the loaded pipeline ("sdxl" / "sd15"), None until a model is loaded
+            # Architecture of the loaded pipeline ("sdxl" / "sd15" / "zimage"), None until loaded
             "architecture": getattr(backends.generator, "architecture", None),
         }
 
     @app.get("/api/models")
     def models() -> dict:
+        default_name = settings.model_id if backends.name != "mock" else "mock"
+        checkpoints = [
+            model_entry(item, inspect_checkpoint(settings.checkpoints_dir / item["name"]).architecture)
+            for item in list_models(settings.checkpoints_dir)
+        ]
+        loras = [
+            {**item, "architecture": detect_lora_architecture(settings.loras_dir / item["name"])}
+            for item in list_models(settings.loras_dir)
+        ]
         return {
-            "default": settings.model_id if backends.name != "mock" else "mock",
-            "checkpoints": list_models(settings.checkpoints_dir),
-            "loras": list_models(settings.loras_dir),
+            "default": default_name,
+            "default_model": model_entry({"name": default_name}, default_architecture()),
+            "checkpoints": checkpoints,
+            "loras": loras,
         }
 
     # blocking API: waits for the result

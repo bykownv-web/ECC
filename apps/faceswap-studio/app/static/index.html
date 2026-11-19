@@ -21,10 +21,14 @@
         </label>
         <label>Негативный промпт
           <input name="negative_prompt" maxlength="1000" placeholder="blurry, low quality, deformed">
+          <small id="negative-hint" class="hint" hidden>Z-Image Turbo учитывает негативный промпт только при CFG больше 0.</small>
         </label>
         <div class="model-block">
           <label>Модель
-            <select name="model"><option value="">По умолчанию</option></select>
+            <span class="model-select">
+              <select name="model"><option value="">По умолчанию</option></select>
+              <span class="arch-badge" hidden></span>
+            </span>
           </label>
           <div class="loras"></div>
           <button type="button" class="secondary add-lora">+ LoRA</button>

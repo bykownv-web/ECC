@@ -2,8 +2,11 @@
 #   https://pytorch.org/get-started/locally/  (e.g. --index-url https://download.pytorch.org/whl/cu124)
 -r requirements.txt
 torch>=2.3
-diffusers>=0.30
-transformers>=4.44
+# 0.39+: Z-Image Turbo (ZImagePipeline, single-file ZImageTransformer2DModel incl. ComfyUI keys,
+# 8-step sigma schedule). On Python 3.10 pip resolves to diffusers 0.41.x (0.42+ needs Python 3.11).
+diffusers>=0.39
+# 4.51+: Qwen3 (text encoder of Z-Image)
+transformers>=4.51
 accelerate>=0.33
 safetensors>=0.4
 peft>=0.12   # LoRA adapters

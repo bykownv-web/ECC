@@ -89,3 +89,14 @@ button.secondary {
   border-radius: 8px; padding: 6px 10px; font: inherit; cursor: pointer; align-self: flex-start;
 }
 button.secondary:disabled { opacity: .5; cursor: not-allowed; }
+
+.model-select { display: flex; align-items: center; gap: 8px; }
+.model-select select { flex: 1 1 auto; min-width: 0; }
+.arch-badge {
+  flex: none; font-size: 12px; font-weight: 600; color: var(--accent);
+  border: 1px solid var(--accent); border-radius: 999px; padding: 2px 10px; white-space: nowrap;
+}
+.arch-badge[hidden], .hint[hidden] { display: none; }
+.arch-badge.unknown { color: var(--muted); border-color: var(--border); }
+.hint { font-size: 12px; color: var(--muted); }
+input:disabled { opacity: .6; }

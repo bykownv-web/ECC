@@ -30,6 +30,7 @@
         if (h.lowvram_active) parts.push("режим экономии видеопамяти");
         if (h.architecture === "sd15") parts.push("модель SD 1.5: лучше 512×512");
         else if (h.architecture === "sdxl") parts.push("модель SDXL: 1024×1024");
+        else if (h.architecture === "zimage") parts.push("модель Z-Image Turbo: 8 шагов, CFG 0");
         els.status.textContent = parts.join(" · ");
         els.status.className = "status ok";
       })
@@ -54,14 +55,63 @@
     list.append(row);
   }
 
+  // Architecture badge + per-architecture defaults (steps / CFG / size) of the selected model
+  const ARCH_LABELS = { sdxl: "SDXL", sd15: "SD 1.5", zimage: "Z-Image Turbo" };
+  const modelInfo = new Map(); // select value -> { architecture, defaults }
+
+  function setField(form, name, value) {
+    const input = form.elements.namedItem(name);
+    if (input && value != null) input.value = String(value);
+  }
+
+  function updateNegativePrompt(form) {
+    const info = modelInfo.get(form.elements.namedItem("model").value) || {};
+    const neg = form.elements.namedItem("negative_prompt");
+    const hint = $("#negative-hint", form);
+    const zimage = info.architecture === "zimage";
+    const cfg = parseFloat(form.elements.namedItem("guidance").value || "0");
+    // Z-Image Turbo uses the negative prompt only with classifier-free guidance (CFG > 0)
+    neg.disabled = zimage && !(cfg > 0);
+    if (hint) hint.hidden = !zimage;
+  }
+
+  function applyModel(block, fillDefaults) {
+    const form = block.closest("form");
+    const sel = $('select[name="model"]', block);
+    const badge = $(".arch-badge", block);
+    const info = modelInfo.get(sel.value) || {};
+    const label = ARCH_LABELS[info.architecture];
+    // unknown architecture: worth a warning for a local file, noise for the default model
+    badge.hidden = !label && (sel.value === "" || !info.architecture);
+    badge.textContent = label || "архитектура не определена";
+    badge.classList.toggle("unknown", !label);
+    badge.title = label ? `Архитектура модели: ${label}` : "";
+    if (fillDefaults && info.defaults) {
+      setField(form, "steps", info.defaults.steps);
+      setField(form, "guidance", info.defaults.guidance);
+      setField(form, "width", info.defaults.width);
+      setField(form, "height", info.defaults.height);
+    }
+    updateNegativePrompt(form);
+  }
+
   fetch("/api/models")
     .then((r) => r.json())
     .then((m) => {
       loraNames = m.loras.map((l) => l.name);
+      if (m.default_model) modelInfo.set("", m.default_model);
+      m.checkpoints.forEach((c) => modelInfo.set(c.name, c));
       $$(".model-block").forEach((block) => {
         const sel = $('select[name="model"]', block);
         sel.options[0].textContent = `По умолчанию (${m.default})`;
-        m.checkpoints.forEach((c) => sel.add(new Option(`${c.name} · ${c.size_mb} МБ`, c.name)));
+        m.checkpoints.forEach((c) => {
+          const label = ARCH_LABELS[c.architecture];
+          sel.add(new Option(`${c.name} · ${label ? `${label} · ` : ""}${c.size_mb} МБ`, c.name));
+        });
+        const form = block.closest("form");
+        sel.addEventListener("change", () => applyModel(block, true));
+        form.elements.namedItem("guidance").addEventListener("input", () => updateNegativePrompt(form));
+        applyModel(block, true);
         const add = $(".add-lora", block);
         add.disabled = !loraNames.length;
         add.title = loraNames.length ? "" : "Положите .safetensors в models/loras/";

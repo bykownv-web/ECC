@@ -8,6 +8,13 @@ from PIL import Image
 from app.config import Settings
 from app.main import create_app
 from app.safety import ContentBlocked, check_prompt
+from tests.safetensors_fakes import (
+    SDXL_KEYS,
+    SDXL_LORA_KEYS,
+    ZIMAGE_LORA_KEYS,
+    ZIMAGE_TRANSFORMER_KEYS,
+    write_safetensors,
+)
 
 
 @pytest.fixture
@@ -165,3 +172,87 @@ def test_face_swap_endpoints_removed(client, path):
 def test_health_has_no_face_swap_fields(client):
     body = client.get("/api/health").json()
     assert not any("swap" in key for key in body)
+
+
+# ---------------------------------------------------------------- architectures / defaults
+
+
+@pytest.fixture
+def arch_client(tmp_path):
+    ckpt, loras = tmp_path / "checkpoints", tmp_path / "loras"
+    ckpt.mkdir()
+    loras.mkdir()
+    write_safetensors(ckpt / "juggernautXL.safetensors", SDXL_KEYS)
+    write_safetensors(ckpt / "zitRealism.safetensors", ZIMAGE_TRANSFORMER_KEYS)
+    (ckpt / "garbage.safetensors").write_bytes(b"not a safetensors file")
+    write_safetensors(loras / "sdxlStyle.safetensors", SDXL_LORA_KEYS)
+    write_safetensors(loras / "zitStyle.safetensors", ZIMAGE_LORA_KEYS)
+    s = replace(
+        Settings(), backend="mock", output_dir=tmp_path / "out", checkpoints_dir=ckpt, loras_dir=loras
+    )
+    app = create_app(s)
+    calls = []
+    original = app.state.backends.generator.generate
+
+    def spy(params):
+        calls.append(params)
+        return original(params)
+
+    app.state.backends.generator.generate = spy
+    return TestClient(app), calls
+
+
+def test_models_listing_has_architecture_and_defaults(arch_client):
+    client, _ = arch_client
+    body = client.get("/api/models").json()
+    by_name = {c["name"]: c for c in body["checkpoints"]}
+    sdxl = by_name["juggernautXL.safetensors"]
+    assert sdxl["architecture"] == "sdxl"
+    assert sdxl["defaults"] == {"steps": 30, "guidance": 7.0, "width": 1024, "height": 1024}
+    zit = by_name["zitRealism.safetensors"]
+    assert zit["architecture"] == "zimage" and zit["label"] == "Z-Image Turbo"
+    assert zit["defaults"] == {"steps": 8, "guidance": 0.0, "width": 1024, "height": 1024}
+    assert by_name["garbage.safetensors"]["architecture"] == "unknown"
+    assert body["default_model"]["name"] == "mock" and "defaults" in body["default_model"]
+    assert {lo["name"]: lo["architecture"] for lo in body["loras"]} == {
+        "sdxlStyle.safetensors": "sdxl",
+        "zitStyle.safetensors": "zimage",
+    }
+
+
+def test_zimage_request_gets_turbo_defaults(arch_client):
+    client, calls = arch_client
+    zit, sdxl = "zitRealism.safetensors", "juggernautXL.safetensors"
+    res = client.post("/api/generate", json={"prompt": "lighthouse", "model": zit, "width": 1000})
+    assert res.status_code == 200, res.text
+    params = calls[-1]
+    assert (params.steps, params.guidance, params.architecture) == (8, 0.0, "zimage")
+    assert params.width == 992  # multiple of 16 for Z-Image
+    client.post("/api/generate", json={"prompt": "x", "model": sdxl, "width": 1000})
+    assert (calls[-1].steps, calls[-1].guidance, calls[-1].width) == (30, 7.0, 1000)
+    # explicit values from the user win
+    client.post("/api/generate", json={"prompt": "x", "model": zit, "steps": 12, "guidance": 1.5})
+    assert (calls[-1].steps, calls[-1].guidance) == (12, 1.5)
+
+
+def test_lora_architecture_mismatch_is_400(arch_client):
+    client, _ = arch_client
+    body = {"prompt": "x", "model": "zitRealism.safetensors", "loras": [{"name": "sdxlStyle.safetensors"}]}
+    res = client.post("/api/generate", json=body)
+    assert res.status_code == 400
+    assert res.json()["detail"].startswith("LoRA sdxlStyle.safetensors обучена для SDXL")
+    assert "Z-Image Turbo" in res.json()["detail"]
+    body["loras"] = [{"name": "zitStyle.safetensors"}]
+    ok = client.post("/api/generate", json=body)
+    assert ok.status_code == 200, ok.text
+
+
+def test_zimage_results_keep_safeguards(arch_client):
+    client, _ = arch_client
+    zit = "zitRealism.safetensors"
+    assert client.post("/api/generate", json={"prompt": "nude portrait", "model": zit}).status_code == 422
+    data = client.post(
+        "/api/generate", json={"prompt": "tree", "model": zit, "width": 256, "height": 256}
+    ).json()
+    img = Image.open(io.BytesIO(client.get(data["url"]).content))
+    assert img.info["ai_generated"] == "true"

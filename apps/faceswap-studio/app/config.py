@@ -41,6 +41,9 @@ class Settings:
     backend: str = "diffusers"
     # Hugging Face id or local path of a text-to-image model
     model_id: str = "stabilityai/stable-diffusion-xl-base-1.0"
+    # Diffusers repo that supplies the text encoder, VAE, tokenizer and scheduler for
+    # transformer-only Z-Image Turbo (ZIT) checkpoints, e.g. from Civitai
+    zimage_base: str = "Tongyi-MAI/Z-Image-Turbo"
     # Local single-file models (.safetensors from Civitai etc.)
     checkpoints_dir: Path = APP_ROOT / "models" / "checkpoints"
     loras_dir: Path = APP_ROOT / "models" / "loras"
@@ -48,6 +51,7 @@ class Settings:
     # "auto" picks cuda > mps > cpu
     device: str = "auto"
     # Low-VRAM mode (CPU offload + VAE slicing/tiling): "auto" = on when the GPU has < 10 GB
+    # (< 22 GB for Z-Image, whose transformer + text encoder need ~20 GB in bfloat16)
     lowvram: str = "auto"
     # Optional NSFW image classifier (transformers); empty string disables it
     nsfw_model_id: str = "Falconsai/nsfw_image_detection"
@@ -67,6 +71,7 @@ class Settings:
         return cls(
             backend=os.environ.get("FSS_BACKEND", cls.backend).strip().lower(),
             model_id=os.environ.get("FSS_MODEL_ID", cls.model_id),
+            zimage_base=os.environ.get("FSS_ZIMAGE_BASE", cls.zimage_base).strip() or cls.zimage_base,
             device=os.environ.get("FSS_DEVICE", cls.device),
             lowvram=_lowvram(os.environ.get("FSS_LOWVRAM", cls.lowvram)),
             checkpoints_dir=Path(os.environ.get("FSS_CHECKPOINTS_DIR", str(cls.checkpoints_dir))),
