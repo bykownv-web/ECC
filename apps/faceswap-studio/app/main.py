@@ -22,6 +22,7 @@ from .backends import (
     BackendUnavailable,
     GenerateParams,
     build_backends,
+    unsupported_message,
 )
 from .config import Settings
 from .jobs import ERROR, Job, JobContext, JobError, JobManager, ProgressFn
@@ -29,6 +30,7 @@ from .model_arch import (
     LABELS,
     SIZE_MULTIPLE,
     UNKNOWN,
+    UNSUPPORTED,
     defaults_for,
     detect_lora_architecture,
     guess_repo_architecture,
@@ -175,6 +177,8 @@ def create_app(settings: Settings | None = None, backends: Backends | None = Non
                 raise HTTPException(400, f"LoRA не найдена: {spec.name}")
             loras.append((path, spec.weight))
         arch = inspect_checkpoint(checkpoint).architecture if checkpoint else default_architecture()
+        if checkpoint is not None and arch in UNSUPPORTED:
+            raise HTTPException(400, unsupported_message(checkpoint.name, arch))
         known = arch if arch and arch != UNKNOWN else None
         if known:
             for path, _ in loras:

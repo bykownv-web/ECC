@@ -13,8 +13,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.backends import (
-    LORA_ZIMAGE_UNSUPPORTED,
     ZIMAGE_DIFFUSERS_HINT,
+    ZIMAGE_FP16_BLACK,
     Backends,
     BackendUnavailable,
     DiffusersGenerator,
@@ -33,6 +33,7 @@ from tests.test_diffusers_generator import FakePipe, fake_modules  # noqa: F401 
 
 BASE = "Tongyi-MAI/Z-Image-Turbo"
 GPU_16GB = 17163091968  # what torch reports for a 16 GB card (16368 MiB)
+GPU_24GB = 25393692672  # what torch reports for a 24 GB card (RTX 3090 / 4090), ~23.6 GiB
 
 
 class FakeModule:
@@ -182,11 +183,54 @@ def test_transformer_only_checkpoint_uses_base_repo(zi, zit):
     assert ("to", "cuda") in gen._pipe.log  # 32 GB: no offload
 
 
-def test_zimage_float16_when_gpu_lacks_bf16(zi, zit):
-    sys.modules["torch"].bf16 = False
+def test_zimage_bf16_even_without_native_bf16(zi, zit):
+    sys.modules["torch"].bf16 = False  # pre-Ampere GPU: bf16 is emulated, slower but correct
     gen = DiffusersGenerator("org/model", "cuda", zimage_base=BASE)
-    gen.generate(zparams(zit))
+    gen.generate(zparams(zit))  # FakePipe returns a black image: no fp16 check in bf16
+    assert zi.transformers[0]["dtype"] == "bf16" and zi.pretrained[0]["dtype"] == "bf16"
+
+
+def test_zimage_fp16_only_on_request_and_black_output_detected(zi, zit, monkeypatch):
+    gen = DiffusersGenerator("org/model", "cuda", zimage_base=BASE, zimage_dtype="fp16")
+    with pytest.raises(BackendUnavailable) as info:
+        gen.generate(zparams(zit))  # FakePipe images are all black, as NaN output would be
+    assert str(info.value) == ZIMAGE_FP16_BLACK and "FSS_ZIMAGE_DTYPE" in ZIMAGE_FP16_BLACK
     assert zi.transformers[0]["dtype"] == "fp16" and zi.pretrained[0]["dtype"] == "fp16"
+    original = FakePipe.__call__
+
+    def white(self, **kwargs):
+        out = original(self, **kwargs)
+        out.images[0].paste((255, 255, 255), (0, 0, 8, 8))
+        return out
+
+    monkeypatch.setattr(FakePipe, "__call__", white)
+    image, _ = gen.generate(zparams(zit))
+    assert image.getpixel((0, 0)) == (255, 255, 255)
+
+
+def test_zimage_dtype_setting(monkeypatch):
+    monkeypatch.setenv("FSS_ZIMAGE_DTYPE", "FP16")
+    assert Settings.from_env().zimage_dtype == "fp16"
+    monkeypatch.setenv("FSS_ZIMAGE_DTYPE", "bfloat16")
+    assert Settings.from_env().zimage_dtype == "bf16"
+    monkeypatch.setenv("FSS_ZIMAGE_DTYPE", "fp8")
+    with pytest.raises(ValueError):
+        Settings.from_env()
+
+
+def test_autopipeline_zimage_repo_reloaded_in_zimage_dtype(zi, zit, monkeypatch):
+    def auto(model_id, **kwargs):
+        zi.loads.append(("hf", model_id, kwargs["torch_dtype"]))
+        return ZImagePipeline(("hf", model_id), {"vae": FakeVae(None), "text_encoder": FakeModule("fp16-te")})
+
+    monkeypatch.setattr(sys.modules["diffusers"].AutoPipelineForText2Image, "from_pretrained", auto)
+    gen = DiffusersGenerator("someone/turbo-mirror", "cuda", zimage_base="someone/turbo-mirror")
+    gen.generate(zparams(None))
+    assert zi.loads[0] == ("hf", "someone/turbo-mirror", "fp16")  # name did not reveal Z-Image
+    assert zi.pretrained == [{"repo": "someone/turbo-mirror", "dtype": "bf16"}]  # reloaded in bf16
+    assert gen.architecture == "zimage" and gen._pipe.source == ("zimage", "someone/turbo-mirror")
+    gen.generate(zparams(zit))  # reuse now hands over bf16 components, not the fp16 ones
+    assert repr(zi.pretrained[1]["text_encoder"]) != "<fp16-te>"
 
 
 def test_zimage_bf16_on_cpu(zi, zit):
@@ -301,7 +345,8 @@ def test_16gb_card_sdxl_on_gpu_zimage_offloaded(zi, zit, sdxl):
     "mode, vram, expect",
     [
         ("auto", 25 * 2**30, "none"),
-        ("auto", 23.99 * 2**30, "model"),  # 24 GB cards report slightly less than 24 GiB
+        ("auto", GPU_24GB, "none"),  # ~21 GB of weights fit on a 24 GB card
+        ("auto", 22 * 2**30 - 1, "model"),
         ("auto", GPU_16GB, "model"),
         ("auto", 12 * 2**30, "group"),
         ("on", 32 * 2**30, "model"),
@@ -384,16 +429,51 @@ def test_zimage_lora_supported(zi, zit):
     assert ("unload",) in gen._pipe.log
 
 
-def test_zimage_lora_unsupported(zi, zit, monkeypatch):
-    monkeypatch.delattr(FakePipe, "load_lora_weights")
+def test_set_adapters_failure_unloads_and_next_generation_works(zi, zit, monkeypatch):
+    # peft only warns when no LoRA key matches, then set_adapters raises ValueError
+    def set_adapters(self, names, adapter_weights):
+        if any(n in self._loaded for n in names):
+            raise ValueError("Adapter name lora0 already in use")  # what a leftover would cause
+        if self.fail_adapters:
+            raise ValueError("Adapter name(s) {'lora1'} not in the list of present adapters")
+        self.log.append(("set_adapters", tuple(names), tuple(adapter_weights)))
+
+    def load(self, directory, weight_name, adapter_name):
+        self.log.append(("load_lora", weight_name, adapter_name))
+
+    def unload(self):
+        self.log.append(("unload",))
+        self._loaded = set()
+
+    monkeypatch.setattr(FakePipe, "_loaded", set(), raising=False)
+    monkeypatch.setattr(FakePipe, "fail_adapters", True, raising=False)
+    monkeypatch.setattr(FakePipe, "set_adapters", set_adapters)
+    monkeypatch.setattr(FakePipe, "load_lora_weights", load)
+    monkeypatch.setattr(FakePipe, "unload_lora_weights", unload)
     gen = DiffusersGenerator("org/model", "cpu", zimage_base=BASE)
+    loras = ((Path("/l/a.safetensors"), 1.0), (Path("/l/b.safetensors"), 0.5))
     with pytest.raises(BackendUnavailable) as info:
-        gen.generate(zparams(zit, loras=((Path("/l/x.safetensors"), 1.0),)))
-    assert str(info.value) == LORA_ZIMAGE_UNSUPPORTED
-    assert LORA_ZIMAGE_UNSUPPORTED.startswith("LoRA для Z-Image пока не поддерживается")
+        gen.generate(zparams(zit, loras=loras))
+    assert str(info.value).startswith("LoRA не подходит к выбранной модели (a.safetensors, b.safetensors")
+    assert ("unload",) in gen._pipe.log
+    assert not any(e[0] == "call" for e in gen._pipe.log)
+    monkeypatch.setattr(FakePipe, "fail_adapters", False, raising=False)
+    gen.generate(zparams(zit, loras=loras))
+    assert ("set_adapters", ("lora0", "lora1"), (1.0, 0.5)) in gen._pipe.log
+    gen.generate(zparams(zit))  # and without LoRA
 
 
 def test_zimage_lora_mismatch_message(zi, zit):
     gen = DiffusersGenerator("org/model", "cpu", zimage_base=BASE)
     with pytest.raises(BackendUnavailable, match="Z-Image Turbo"):
         gen.generate(zparams(zit, loras=((Path("/l/bad.safetensors"), 1.0),)))
+
+
+def test_flux_checkpoint_rejected_by_backend(zi, tmp_path):
+    from tests.safetensors_fakes import FLUX_KEYS
+
+    path = write_safetensors(tmp_path / "flux1-dev.safetensors", FLUX_KEYS)
+    gen = DiffusersGenerator("org/model", "cpu", zimage_base=BASE)
+    with pytest.raises(BackendUnavailable, match="FLUX, такие модели приложение не поддерживает"):
+        gen.generate(zparams(path))
+    assert zi.loads == []

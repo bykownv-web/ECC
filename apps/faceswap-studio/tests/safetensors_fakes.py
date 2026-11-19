@@ -41,6 +41,20 @@ ZIMAGE_BUNDLE_KEYS = [
 # Lumina 2 looks similar but uses adaLN_modulation.1 - must not be taken for Z-Image
 LUMINA2_KEYS = ["cap_embedder.0.weight", "layers.0.adaLN_modulation.1.weight"]
 
+# FLUX (not supported): original/ComfyUI checkpoint keys and LoRAs in diffusers / kohya / ComfyUI style
+FLUX_KEYS = [
+    "model.diffusion_model.double_blocks.0.img_attn.qkv.weight",
+    "model.diffusion_model.single_blocks.0.linear1.weight",
+]
+FLUX_LORA_KEY_SETS = [
+    [
+        "transformer.single_transformer_blocks.0.attn.to_q.lora_A.weight",
+        "transformer.transformer_blocks.1.attn.to_q.lora_A.weight",
+    ],
+    ["lora_unet_double_blocks_0_img_attn_qkv.lora_down.weight"],
+    ["diffusion_model.single_blocks.3.linear1.lora_A.weight"],
+]
+
 SDXL_LORA_KEYS = [
     "lora_unet_input_blocks_4_1_transformer_blocks_1_attn1_to_k.lora_down.weight",
     "lora_te2_text_model_encoder_layers_0_mlp_fc1.lora_down.weight",

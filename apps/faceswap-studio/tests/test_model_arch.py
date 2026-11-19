@@ -6,6 +6,7 @@ import struct
 import pytest
 
 from app.model_arch import (
+    LABELS,
     InvalidSafetensors,
     defaults_for,
     detect_architecture,
@@ -15,6 +16,8 @@ from app.model_arch import (
     read_header,
 )
 from tests.safetensors_fakes import (
+    FLUX_KEYS,
+    FLUX_LORA_KEY_SETS,
     LUMINA2_KEYS,
     SD15_KEYS,
     SD15_LORA_KEYS,
@@ -145,3 +148,36 @@ def test_defaults_per_architecture():
     assert defaults_for("sdxl", 25) == {"steps": 25, "guidance": 7.0, "width": 1024, "height": 1024}
     assert defaults_for("sd15", 30)["width"] == 512
     assert defaults_for(None, 30) == defaults_for("sdxl", 30)
+
+
+@pytest.mark.parametrize("body", [b"[" * 200000, b'{"a":' + b"[" * 200000, b' {"a": 1}'])
+def test_deeply_nested_or_non_object_header(tmp_path, body):
+    path = _raw(tmp_path / "deep.safetensors", len(body), body)
+    with pytest.raises(InvalidSafetensors):
+        read_header(path)
+    assert detect_architecture(path) == "unknown"
+
+
+def test_flux_detected_as_unsupported(tmp_path):
+    ckpt = write_safetensors(tmp_path / "flux1-dev.safetensors", FLUX_KEYS)
+    assert detect_architecture(ckpt) == "flux"
+    for i, keys in enumerate(FLUX_LORA_KEY_SETS):
+        lora = write_safetensors(tmp_path / f"fluxLora{i}.safetensors", keys)
+        assert detect_lora_architecture(lora) == "flux", keys
+    assert LABELS["flux"] == "FLUX (не поддерживается)"
+
+
+@pytest.mark.parametrize(
+    "model_id, arch",
+    [
+        ("C:\\Users\\alexl\\models\\my-model", None),  # "xl" inside a user name is no hint
+        ("/home/alexl/m", None),
+        ("RunDiffusion/Juggernaut-XL-v9", "sdxl"),
+        ("stabilityai/sdxl-turbo", "sdxl"),
+        ("stable-diffusion-v1-5/stable-diffusion-v1-5", "sd15"),
+        ("D:\\models\\Z-Image-Turbo", "zimage"),
+        ("someone/pixel-art", None),
+    ],
+)
+def test_repo_name_guess_uses_last_segment_tokens(model_id, arch):
+    assert guess_repo_architecture(model_id) == arch

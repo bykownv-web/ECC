@@ -22,6 +22,7 @@ from .model_arch import (
     SD15,
     SDXL,
     UNKNOWN,
+    UNSUPPORTED,
     ZIMAGE,
     architecture_from_class_name,
     guess_repo_architecture,
@@ -38,17 +39,30 @@ class BackendUnavailable(Exception):
 OOM_HINT = "Не хватило видеопамяти: уменьшите размер до 768×768 или включите FSS_LOWVRAM=on"
 STAGE_LOADING = "Загрузка модели…"
 # auto low-VRAM: on when the GPU has less memory than this (compared in bytes; a "16 GB" card
-# reports ~15.9-16.0 GiB). SDXL / SD 1.5 fit in 10 GB; Z-Image needs ~12 GB (bf16 DiT) + ~8 GB
-# (Qwen3-4B text encoder) at once, so below 24 GB it runs with model CPU offload (peak ~13 GB).
+# reports ~15.9-16.0 GiB, a "24 GB" card ~23.6 GiB). SDXL / SD 1.5 fit in 10 GB; Z-Image needs
+# ~12 GB (bf16 DiT) + ~8 GB (Qwen3-4B text encoder) at once (~21 GB), so below 22 GiB it runs
+# with model CPU offload (peak ~13 GB) and 24 GB cards keep everything on the GPU.
 LOWVRAM_THRESHOLD_BYTES = 10 * 2**30
-LOWVRAM_THRESHOLDS = {SDXL: LOWVRAM_THRESHOLD_BYTES, SD15: LOWVRAM_THRESHOLD_BYTES, ZIMAGE: 24 * 2**30}
+LOWVRAM_THRESHOLDS = {SDXL: LOWVRAM_THRESHOLD_BYTES, SD15: LOWVRAM_THRESHOLD_BYTES, ZIMAGE: 22 * 2**30}
 # Below this even the Z-Image transformer alone does not fit: offload it block by block instead
 ZIMAGE_GROUP_OFFLOAD_BELOW = 14 * 2**30
 ZIMAGE_DIFFUSERS_HINT = (
     "Для Z-Image Turbo нужен diffusers 0.39 или новее и transformers 4.51 или новее: "
     "запустите install.bat ещё раз (или pip install -U -r requirements-gpu.txt)."
 )
-LORA_ZIMAGE_UNSUPPORTED = "LoRA для Z-Image пока не поддерживается установленной версией diffusers."
+ZIMAGE_FP16_BLACK = (
+    "Z-Image в float16 выдал пустое (чёрное) изображение: веса модели рассчитаны на bfloat16. "
+    "Уберите FSS_ZIMAGE_DTYPE=fp16 (или задайте bf16) и перезапустите приложение."
+)
+
+
+def unsupported_message(name: str, arch: str) -> str:
+    return f"{name}: это модель {LABELS[arch].split(' (')[0]}, такие модели приложение не поддерживает."
+
+
+def _is_blank(image: Image.Image) -> bool:
+    """All-black output: what NaNs (fp16 overflow) turn into after VAE post-processing."""
+    return int(np.asarray(image.convert("L")).max()) == 0
 
 
 def _report(progress: ProgressFn | None, stage: str, fraction: float) -> None:
@@ -116,11 +130,14 @@ class DiffusersGenerator:
         device: str,
         lowvram: str = "auto",
         zimage_base: str = "Tongyi-MAI/Z-Image-Turbo",
+        zimage_dtype: str = "auto",
     ) -> None:
         self.model_id = model_id
         self.device = device
         self.lowvram = lowvram
         self.zimage_base = zimage_base
+        self.zimage_dtype = zimage_dtype  # "auto" (= bf16) | "bf16" | "fp16"
+        self._fp16_zimage = False  # the loaded Z-Image pipeline runs in float16
         self._gpu_total: int | None = None
         self._gpu_queried = False
         self._lowvram_active: bool | None = None
@@ -210,7 +227,7 @@ class DiffusersGenerator:
         when the next pipeline is built from the same base repo, so they need not be reloaded."""
         old, old_arch, old_repo, old_offload = self._pipe, self.architecture, self._zimage_repo, self._offload
         self._pipe, self._pipe_key, self.architecture, self._zimage_repo = None, None, None, None
-        self._lowvram_active, self._offload = None, None
+        self._lowvram_active, self._offload, self._fp16_zimage = None, None, False
         reuse: dict = {}
         # group offloading hooks cannot be re-applied to the same modules: reload those instead
         if old is not None and old_arch == ZIMAGE and keep_zimage_repo and old_repo == keep_zimage_repo:
@@ -228,6 +245,8 @@ class DiffusersGenerator:
             return self._pipe
         torch, diffusers = self._imports()
         arch = self._target_architecture(checkpoint, arch_hint)
+        if arch in UNSUPPORTED:
+            raise BackendUnavailable(unsupported_message(checkpoint.name if checkpoint else key, arch))
         zimage_repo = None
         if arch == ZIMAGE:
             zimage_repo = self.zimage_base if checkpoint is not None else self.model_id
@@ -251,12 +270,20 @@ class DiffusersGenerator:
             else:
                 pipe = self._load_pretrained(torch, diffusers, dtype)
                 arch = self._detect_architecture(pipe)
-                if arch == ZIMAGE:  # unrecognised Z-Image repo id: recompute placement
+                if arch == ZIMAGE:
+                    # Z-Image repo the name heuristics missed: AutoPipeline loaded it in float16;
+                    # reload in the Z-Image dtype so reused components never mix dtypes
+                    log.info("%s is a Z-Image repo: reloading in the Z-Image dtype", key)
+                    del pipe
+                    self._free_memory(torch)
                     zimage_repo = self.model_id
                     plan = self._offload_plan(torch, arch)
+                    dtype = self._zimage_dtype(torch)
+                    pipe = self._load_zimage(torch, diffusers, None, zimage_repo, dtype, {})
         pipe = self._place(torch, pipe, arch, plan)
         self._pipe, self._pipe_key, self.architecture = pipe, key, arch
         self._zimage_repo, self._offload, self._lowvram_active = zimage_repo, plan, plan != "none"
+        self._fp16_zimage = arch == ZIMAGE and dtype == torch.float16
         return pipe
 
     def _load_pretrained(self, torch, diffusers, dtype):
@@ -337,17 +364,11 @@ class DiffusersGenerator:
     # ------------------------------------------------------------------ Z-Image
 
     def _zimage_dtype(self, torch):
-        """bfloat16 (the dtype Z-Image is published in); float16 on CUDA GPUs without bf16."""
-        if self.device == "cuda":
-            try:
-                try:  # native support only: emulated bf16 on Turing/Pascal is very slow
-                    native = torch.cuda.is_bf16_supported(including_emulation=False)
-                except TypeError:  # torch < 2.3
-                    native = torch.cuda.is_bf16_supported()
-            except Exception:  # noqa: BLE001
-                native = False
-            if not native:
-                return torch.float16
+        """bfloat16, the dtype Z-Image is published in, also on GPUs older than Ampere (slower
+        there, but correct). float16 only on request (FSS_ZIMAGE_DTYPE=fp16): the transformer has
+        no fp16 overflow guards, so it may produce black images."""
+        if (self.zimage_dtype or "auto").strip().lower() == "fp16":
+            return torch.float16
         return torch.bfloat16
 
     def _load_zimage(self, torch, diffusers, checkpoint: Path | None, repo: str, dtype, reuse: dict):
@@ -402,8 +423,6 @@ class DiffusersGenerator:
     def _apply_loras(self, pipe, loras: tuple[tuple[Path, float], ...]) -> None:
         if not loras:
             return
-        if self.architecture == ZIMAGE and not callable(getattr(pipe, "load_lora_weights", None)):
-            raise BackendUnavailable(LORA_ZIMAGE_UNSUPPORTED)
         names, weights = [], []
         for i, (path, weight) in enumerate(loras):
             name = f"lora{i}"
@@ -417,7 +436,15 @@ class DiffusersGenerator:
                 ) from exc
             names.append(name)
             weights.append(weight)
-        pipe.set_adapters(names, adapter_weights=weights)
+        try:
+            pipe.set_adapters(names, adapter_weights=weights)
+        except Exception as exc:  # noqa: BLE001 - e.g. ValueError: no adapter created (keys did not match)
+            pipe.unload_lora_weights()
+            base = LABELS.get(self.architecture or UNKNOWN, "SDXL, SD 1.5 или Z-Image")
+            files = ", ".join(path.name for path, _ in loras)
+            raise BackendUnavailable(
+                f"LoRA не подходит к выбранной модели ({files}; нужна LoRA для той же базы: {base})."
+            ) from exc
 
     # ------------------------------------------------------------------ generation
 
@@ -486,7 +513,10 @@ class DiffusersGenerator:
                 raise BackendUnavailable(OOM_HINT) from exc
         if cancelled:
             raise JobCancelled("Генерация отменена.")
-        return result.images[0], seed
+        image = result.images[0]
+        if self._fp16_zimage and _is_blank(image):
+            raise BackendUnavailable(ZIMAGE_FP16_BLACK)
+        return image, seed
 
 
 # --------------------------------------------------------------------------- mock
@@ -544,7 +574,11 @@ def build_backends(settings: Settings) -> Backends:
             "diffusers",
             device,
             DiffusersGenerator(
-                settings.model_id, device, lowvram=settings.lowvram, zimage_base=settings.zimage_base
+                settings.model_id,
+                device,
+                lowvram=settings.lowvram,
+                zimage_base=settings.zimage_base,
+                zimage_dtype=settings.zimage_dtype,
             ),
         )
     raise ValueError(f"Unknown FSS_BACKEND: {settings.backend!r}")

@@ -9,6 +9,8 @@ from app.config import Settings
 from app.main import create_app
 from app.safety import ContentBlocked, check_prompt
 from tests.safetensors_fakes import (
+    FLUX_KEYS,
+    FLUX_LORA_KEY_SETS,
     SDXL_KEYS,
     SDXL_LORA_KEYS,
     ZIMAGE_LORA_KEYS,
@@ -256,3 +258,21 @@ def test_zimage_results_keep_safeguards(arch_client):
     ).json()
     img = Image.open(io.BytesIO(client.get(data["url"]).content))
     assert img.info["ai_generated"] == "true"
+
+
+def test_flux_checkpoint_and_lora_are_rejected_clearly(arch_client, tmp_path):
+    client, calls = arch_client
+    write_safetensors(tmp_path / "checkpoints" / "flux1-dev.safetensors", FLUX_KEYS)
+    write_safetensors(tmp_path / "loras" / "fluxLora.safetensors", FLUX_LORA_KEY_SETS[0])
+    body = client.get("/api/models").json()
+    flux = next(c for c in body["checkpoints"] if c["name"] == "flux1-dev.safetensors")
+    assert flux["architecture"] == "flux" and flux["label"] == "FLUX (не поддерживается)"
+    res = client.post("/api/generate", json={"prompt": "x", "model": "flux1-dev.safetensors"})
+    assert res.status_code == 400 and "не поддерживает" in res.json()["detail"]
+    res = client.post(
+        "/api/generate",
+        json={"prompt": "x", "model": "zitRealism.safetensors", "loras": [{"name": "fluxLora.safetensors"}]},
+    )
+    assert res.status_code == 400
+    assert "FLUX (не поддерживается)" in res.json()["detail"]
+    assert calls == []

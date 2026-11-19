@@ -56,7 +56,7 @@
   }
 
   // Architecture badge + per-architecture defaults (steps / CFG / size) of the selected model
-  const ARCH_LABELS = { sdxl: "SDXL", sd15: "SD 1.5", zimage: "Z-Image Turbo" };
+  const ARCH_LABELS = { sdxl: "SDXL", sd15: "SD 1.5", zimage: "Z-Image Turbo", flux: "FLUX (не поддерживается)" };
   const modelInfo = new Map(); // select value -> { architecture, defaults }
 
   function setField(form, name, value) {

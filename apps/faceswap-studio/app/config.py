@@ -35,6 +35,14 @@ def _lowvram(raw: str) -> str:
     return value
 
 
+def _zimage_dtype(raw: str) -> str:
+    value = raw.strip().lower()
+    value = {"bfloat16": "bf16", "float16": "fp16", "": "auto"}.get(value, value)
+    if value not in {"auto", "bf16", "fp16"}:
+        raise ValueError(f"FSS_ZIMAGE_DTYPE must be auto, bf16 or fp16, got {raw!r}")
+    return value
+
+
 @dataclass(frozen=True)
 class Settings:
     # "diffusers" = real local models, "mock" = no models (tests / UI development)
@@ -44,6 +52,8 @@ class Settings:
     # Diffusers repo that supplies the text encoder, VAE, tokenizer and scheduler for
     # transformer-only Z-Image Turbo (ZIT) checkpoints, e.g. from Civitai
     zimage_base: str = "Tongyi-MAI/Z-Image-Turbo"
+    # Z-Image compute dtype: "auto" = bf16 (also on pre-Ampere GPUs, emulated); "fp16" may give black images
+    zimage_dtype: str = "auto"
     # Local single-file models (.safetensors from Civitai etc.)
     checkpoints_dir: Path = APP_ROOT / "models" / "checkpoints"
     loras_dir: Path = APP_ROOT / "models" / "loras"
@@ -51,7 +61,7 @@ class Settings:
     # "auto" picks cuda > mps > cpu
     device: str = "auto"
     # Low-VRAM mode (CPU offload + VAE slicing/tiling): "auto" = on when the GPU has < 10 GB
-    # (< 22 GB for Z-Image, whose transformer + text encoder need ~20 GB in bfloat16)
+    # (< 22 GiB for Z-Image, whose transformer + text encoder need ~21 GB in bfloat16)
     lowvram: str = "auto"
     # Optional NSFW image classifier (transformers); empty string disables it
     nsfw_model_id: str = "Falconsai/nsfw_image_detection"
@@ -72,6 +82,7 @@ class Settings:
             backend=os.environ.get("FSS_BACKEND", cls.backend).strip().lower(),
             model_id=os.environ.get("FSS_MODEL_ID", cls.model_id),
             zimage_base=os.environ.get("FSS_ZIMAGE_BASE", cls.zimage_base).strip() or cls.zimage_base,
+            zimage_dtype=_zimage_dtype(os.environ.get("FSS_ZIMAGE_DTYPE", cls.zimage_dtype)),
             device=os.environ.get("FSS_DEVICE", cls.device),
             lowvram=_lowvram(os.environ.get("FSS_LOWVRAM", cls.lowvram)),
             checkpoints_dir=Path(os.environ.get("FSS_CHECKPOINTS_DIR", str(cls.checkpoints_dir))),

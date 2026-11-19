@@ -18,8 +18,11 @@ from functools import lru_cache
 from pathlib import Path
 
 SDXL, SD15, ZIMAGE, UNKNOWN = "sdxl", "sd15", "zimage", "unknown"
+# Recognised only to give a clear "not supported" message
+FLUX = "flux"
 ARCHITECTURES = (SDXL, SD15, ZIMAGE)
-LABELS = {SDXL: "SDXL", SD15: "SD 1.5", ZIMAGE: "Z-Image Turbo"}
+UNSUPPORTED = (FLUX,)
+LABELS = {SDXL: "SDXL", SD15: "SD 1.5", ZIMAGE: "Z-Image Turbo", FLUX: "FLUX (не поддерживается)"}
 
 MAX_HEADER_BYTES = 100 * 2**20
 
@@ -70,11 +73,13 @@ def read_header(path: Path, max_bytes: int = MAX_HEADER_BYTES) -> dict:
             if length < 2 or length > max_bytes or length > size - 8:
                 raise InvalidSafetensors(f"недопустимая длина заголовка: {length}")
             raw = fh.read(length)
+            if not raw.startswith(b"{"):
+                raise InvalidSafetensors("заголовок не начинается с «{»")
     except OSError as exc:
         raise InvalidSafetensors(str(exc)) from exc
     try:
         header = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError) as exc:
+    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
         raise InvalidSafetensors("заголовок не является JSON") from exc
     if not isinstance(header, dict):
         raise InvalidSafetensors("заголовок не является JSON-объектом")
@@ -102,6 +107,8 @@ def classify_checkpoint_keys(keys: list[str] | set[str]) -> CheckpointInfo:
         "model.diffusion_model.output_blocks.11.0.skip_connection.weight" in keyset
     ):
         return CheckpointInfo(SD15)
+    if any(_FLUX.search(k) for k in keyset):
+        return CheckpointInfo(FLUX)
     return CheckpointInfo(UNKNOWN)
 
 
@@ -125,12 +132,20 @@ def detect_architecture(path: Path) -> str:
     return inspect_checkpoint(path).architecture
 
 
+# FLUX DiT blocks (original / ComfyUI / diffusers / kohya key styles)
+_FLUX = re.compile(r"(?:^|[._])(?:double_blocks|single_blocks|single_transformer_blocks)[._]\d")
+
 # ------------------------------------------------------------------ LoRA
 
 _ZIMAGE_LORA = re.compile(
     r"(?:^|[._])(?:layers|noise_refiner|context_refiner)[._]\d+[._](?:attention|feed_forward|adaLN)"
 )
-_SDXL_LORA = re.compile(r"lora_te2_|text_encoder_2\.|transformer_blocks[._][1-9]")
+# SDXL UNet attention has up to 10 transformer blocks per layer, SD 1.5 only one; DiT models
+# (FLUX, SD3) also use "transformer_blocks", so require a UNet block before it
+_SDXL_LORA = re.compile(
+    r"lora_te2_|text_encoder_2\.|(?:down|up|mid|input|output|middle)_blocks?(?:[._]\d+)?[._].*"
+    r"transformer_blocks[._][1-9]"
+)
 _UNET_LORA = re.compile(r"(?:down|up|mid)_blocks?[._]|(?:input|output|middle)_blocks?[._]")
 _SD15_LORA = re.compile(r"lora_te_text_model|down_blocks[._]0[._]attentions|input_blocks[._][12][._]1[._]")
 
@@ -139,6 +154,8 @@ def classify_lora_keys(keys: list[str] | set[str], metadata: dict | None = None)
     keys = list(keys)
     if any(_ZIMAGE_LORA.search(k) for k in keys) and not any(_UNET_LORA.search(k) for k in keys):
         return ZIMAGE
+    if any(_FLUX.search(k) for k in keys) and not any(_UNET_LORA.search(k) for k in keys):
+        return FLUX
     if any(_SDXL_LORA.search(k) for k in keys):
         return SDXL
     if any(_SD15_LORA.search(k) for k in keys):
@@ -203,12 +220,13 @@ def guess_repo_architecture(model_id: str) -> str | None:
                     return arch
         except (OSError, ValueError, AttributeError):
             continue
-    name = model_id.lower().replace("_", "-")
-    if "z-image" in name or "zimage" in name:
+    # only the last path segment ("org/repo" -> "repo", "C:\\Users\\alexl\\m" -> "m"), whole tokens
+    name = re.split(r"[/\\]", model_id.rstrip("/\\"))[-1].lower().replace("_", "-")
+    if re.search(r"(?:^|[-.])z-?image(?:$|[-.])", name):
         return ZIMAGE
-    if "xl" in name:
+    if re.search(r"(?:^|[-.])(?:sdxl|xl)(?:$|[-.])", name):
         return SDXL
-    if "stable-diffusion-v1" in name or "sd15" in name or "sd-1-5" in name:
+    if re.search(r"(?:^|[-.])(?:sd15|sd-1-5|stable-diffusion-v1-5|v1-5)(?:$|[-.])", name):
         return SD15
     return None
 
