@@ -1,4 +1,4 @@
-"""Model backends: real local models (diffusers + InsightFace) and a mock for tests."""
+"""Model backends: real local models (diffusers) and a mock for tests."""
 
 from __future__ import annotations
 
@@ -12,17 +12,12 @@ from pathlib import Path
 from typing import Protocol
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageDraw
 
-from . import face_engine
 from .config import Settings
 from .jobs import JobCancelled, ProgressFn
 
-log = logging.getLogger("faceswap.backends")
-
-
-class NoFaceFound(Exception):
-    """Raised when no face is detected in an input image."""
+log = logging.getLogger("image_studio.backends")
 
 
 class BackendUnavailable(Exception):
@@ -58,12 +53,6 @@ class Generator(Protocol):
     def generate(self, params: GenerateParams, progress: ProgressFn | None = None) -> tuple[Image.Image, int]:
         """`progress(stage, fraction)` is optional; it may raise JobCancelled to abort."""
         ...
-
-
-class FaceSwapper(Protocol):
-    def swap(
-        self, source: Image.Image, target: Image.Image, all_faces: bool = False
-    ) -> tuple[Image.Image, int]: ...
 
 
 def resolve_device(requested: str) -> str:
@@ -295,64 +284,6 @@ class DiffusersGenerator:
         return result.images[0], seed
 
 
-# --------------------------------------------------------------------------- insightface
-
-
-class InsightFaceSwapper:
-    """Face swap with InsightFace models (SCRFD + ArcFace + inswapper_128) on plain onnxruntime.
-
-    Uses app.face_engine, so the ``insightface`` package (no Windows wheels) is not required.
-    """
-
-    def __init__(self, settings: Settings, device: str) -> None:
-        self.model_path = settings.swap_model_path
-        self.models_dir = settings.swap_model_path.parent
-        self.device = device
-        self._engine = None
-        self._lock = threading.Lock()
-
-    def _load(self):
-        if self._engine is not None:
-            return self._engine
-        if not self.model_path.is_file():
-            raise BackendUnavailable(f"Файл модели подмены лица не найден: {self.model_path}. См. README.")
-        try:
-            providers = face_engine.select_providers(self.device)
-        except ImportError as exc:
-            raise BackendUnavailable("Не установлен onnxruntime. См. requirements-gpu.txt.") from exc
-        self._engine = face_engine.FaceEngine(self.models_dir, providers, swap_model_path=self.model_path)
-        return self._engine
-
-    @staticmethod
-    def _to_bgr(img: Image.Image) -> np.ndarray:
-        return np.asarray(img.convert("RGB"))[:, :, ::-1].copy()
-
-    def swap(
-        self, source: Image.Image, target: Image.Image, all_faces: bool = False
-    ) -> tuple[Image.Image, int]:
-        with self._lock:
-            engine = self._load()
-            try:
-                src = self._to_bgr(source)
-                dst = self._to_bgr(target)
-                src_faces = engine.detect(src)
-                if not src_faces:
-                    raise NoFaceFound("На фото-источнике не найдено лицо.")
-                # Use the largest face of the source photo
-                src_face = engine.embed(src, max(src_faces, key=lambda f: f.area))
-                dst_faces = engine.detect(dst)
-                if not dst_faces:
-                    raise NoFaceFound("На целевом изображении не найдено лицо.")
-                if not all_faces:
-                    dst_faces = [max(dst_faces, key=lambda f: f.area)]
-                out = dst
-                for face in dst_faces:
-                    out = engine.swap(out, face, src_face)
-            except face_engine.FaceEngineError as exc:
-                raise BackendUnavailable(str(exc)) from exc
-        return Image.fromarray(out[:, :, ::-1]), len(dst_faces)
-
-
 # --------------------------------------------------------------------------- mock
 
 
@@ -389,27 +320,6 @@ class MockGenerator:
         return img, seed
 
 
-class MockSwapper:
-    """Pastes a blurred, resized centre crop of the source onto the target centre."""
-
-    def swap(
-        self, source: Image.Image, target: Image.Image, all_faces: bool = False
-    ) -> tuple[Image.Image, int]:
-        out = target.convert("RGB").copy()
-        side = min(out.size) // 3
-        if side < 8:
-            raise NoFaceFound("Изображение слишком маленькое.")
-        src = source.convert("RGB")
-        s = min(src.size)
-        box = ((src.width - s) // 2, (src.height - s) // 2)
-        crop = src.crop((*box, box[0] + s, box[1] + s)).resize((side, side))
-        mask = Image.new("L", (side, side), 0)
-        ImageDraw.Draw(mask).ellipse((0, 0, side, side), fill=255)
-        mask = mask.filter(ImageFilter.GaussianBlur(side // 10))
-        out.paste(crop, ((out.width - side) // 2, (out.height - side) // 2), mask)
-        return out, 1
-
-
 # --------------------------------------------------------------------------- factory
 
 
@@ -418,18 +328,16 @@ class Backends:
     name: str
     device: str
     generator: Generator
-    swapper: FaceSwapper
 
 
 def build_backends(settings: Settings) -> Backends:
     if settings.backend == "mock":
-        return Backends("mock", "cpu", MockGenerator(settings.mock_delay), MockSwapper())
+        return Backends("mock", "cpu", MockGenerator(settings.mock_delay))
     if settings.backend == "diffusers":
         device = resolve_device(settings.device)
         return Backends(
             "diffusers",
             device,
             DiffusersGenerator(settings.model_id, device, lowvram=settings.lowvram),
-            InsightFaceSwapper(settings, device),
         )
     raise ValueError(f"Unknown FSS_BACKEND: {settings.backend!r}")

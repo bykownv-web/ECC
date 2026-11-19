@@ -1,5 +1,5 @@
 @echo off
-rem FaceSwap Studio - запуск. Просто дважды щёлкните этот файл.
+rem Image Studio - запуск. Просто дважды щёлкните этот файл.
 chcp 65001 >nul
 setlocal
 cd /d "%~dp0"
@@ -9,7 +9,7 @@ if not exist ".venv\Scripts\python.exe" (
     pause
     exit /b 1
 )
-echo Запускаю FaceSwap Studio: http://127.0.0.1:8000
+echo Запускаю Image Studio: http://127.0.0.1:8000
 echo Браузер откроется сам, когда сервер будет готов. Чтобы остановить сервер, закройте это окно.
 echo.
 rem Ждём, пока сервер ответит (до 2 минут), и открываем браузер

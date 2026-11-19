@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# FaceSwap Studio - запуск на Linux и macOS.
+# Image Studio - запуск на Linux и macOS.
 #   ./run.sh            - обычный запуск
 #   ./run.sh --mock     - без моделей (FSS_BACKEND=mock)
 # Остальные параметры передаются в app.main, например: ./run.sh --port 8080
@@ -29,7 +29,7 @@ if [ ! -x ".venv/bin/python" ]; then
 fi
 
 URL="http://127.0.0.1:$PORT"
-echo "Запускаю FaceSwap Studio: $URL (остановить - Ctrl+C)"
+echo "Запускаю Image Studio: $URL (остановить - Ctrl+C)"
 
 open_browser() {
     local i

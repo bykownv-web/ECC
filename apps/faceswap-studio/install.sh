@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# FaceSwap Studio - установщик для Linux и macOS.
+# Image Studio - установщик для Linux и macOS.
 #
 #   ./install.sh                 - полная установка (Linux: PyTorch с CUDA при наличии NVIDIA; macOS: MPS)
 #   ./install.sh --mock          - только веб-интерфейс без моделей (FSS_BACKEND=mock)
@@ -12,7 +12,6 @@ APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="$APP_DIR/.venv"
 VENV_PY="$VENV_DIR/bin/python"
 MODELS_DIR="$APP_DIR/models"
-SWAP_MODEL="$MODELS_DIR/inswapper_128.onnx"
 TORCH_INDEX_BASE="https://download.pytorch.org/whl/"
 PYTHON_DOWNLOAD="https://www.python.org/downloads/release/python-3119/"
 TOTAL=6
@@ -95,7 +94,7 @@ version_ge() {
 }
 
 echo "============================================="
-echo " FaceSwap Studio - установка"
+echo " Image Studio - установка"
 echo "============================================="
 echo "Папка приложения: $APP_DIR"
 [ "$MOCK" = 1 ] && echo "Режим --mock: только интерфейс, без PyTorch и моделей."
@@ -122,7 +121,7 @@ for cand in python3.12 python3.11 python3.10 python3 python; do
 done
 if [ -z "$PY" ]; then
     if [ -n "$TOO_NEW" ]; then
-        fail "Найден только Python $TOO_NEW. Он слишком новый: для 3.13+ пока нет надёжных сборок PyTorch/onnxruntime." \
+        fail "Найден только Python $TOO_NEW. Он слишком новый: для 3.13+ пока нет надёжных сборок PyTorch." \
             "установите Python 3.11 ($PYTHON_DOWNLOAD, на Linux - через пакетный менеджер, pyenv или uv)."
     fi
     if [ -n "$TOO_OLD" ]; then
@@ -280,13 +279,6 @@ mkdir -p "$MODELS_DIR/checkpoints" "$MODELS_DIR/loras"
 ok "папки models/checkpoints и models/loras на месте"
 
 if [ "$MOCK" != 1 ]; then
-    if [ -f "$SWAP_MODEL" ]; then
-        ok "модель подмены лица найдена"
-    else
-        warn "Нет модели подмены лица inswapper_128.onnx (~530 МБ). Скрипт её не скачивает."
-        warn "Положите файл сюда: $SWAP_MODEL"
-        MISSING+=("models/inswapper_128.onnx (нужна только для подмены лица)")
-    fi
     if ! ls "$MODELS_DIR"/checkpoints/*.safetensors >/dev/null 2>&1; then
         info "В models/checkpoints пока нет .safetensors - модель по умолчанию скачается при первой генерации (~7 ГБ)."
     fi

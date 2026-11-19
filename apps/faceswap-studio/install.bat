@@ -1,5 +1,5 @@
 @echo off
-rem FaceSwap Studio - установка. Просто дважды щёлкните этот файл.
+rem Image Studio - установка. Просто дважды щёлкните этот файл.
 rem Параметры передаются в scripts\install.ps1, например: install.bat -Mock
 chcp 65001 >nul
 setlocal

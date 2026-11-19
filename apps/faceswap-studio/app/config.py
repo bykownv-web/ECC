@@ -49,17 +49,11 @@ class Settings:
     device: str = "auto"
     # Low-VRAM mode (CPU offload + VAE slicing/tiling): "auto" = on when the GPU has < 10 GB
     lowvram: str = "auto"
-    # inswapper_128 weights (must be placed manually, see README). The detector/recognizer
-    # (buffalo_l: det_10g.onnx, w600k_r50.onnx) live in <this file's folder>/buffalo_l
-    swap_model_path: Path = APP_ROOT / "models" / "inswapper_128.onnx"
-    # Kept for backwards compatibility; the onnxruntime face engine always uses buffalo_l
-    face_analysis_pack: str = "buffalo_l"
     # Optional NSFW image classifier (transformers); empty string disables it
     nsfw_model_id: str = "Falconsai/nsfw_image_detection"
     nsfw_threshold: float = 0.7
     watermark: bool = True
     output_dir: Path = APP_ROOT / "outputs"
-    max_upload_mb: int = 10
     max_side: int = 1536
     default_steps: int = 30
     max_steps: int = 80
@@ -77,13 +71,10 @@ class Settings:
             lowvram=_lowvram(os.environ.get("FSS_LOWVRAM", cls.lowvram)),
             checkpoints_dir=Path(os.environ.get("FSS_CHECKPOINTS_DIR", str(cls.checkpoints_dir))),
             loras_dir=Path(os.environ.get("FSS_LORAS_DIR", str(cls.loras_dir))),
-            swap_model_path=Path(os.environ.get("FSS_SWAP_MODEL_PATH", str(cls.swap_model_path))),
-            face_analysis_pack=os.environ.get("FSS_FACE_PACK", cls.face_analysis_pack),
             nsfw_model_id=os.environ.get("FSS_NSFW_MODEL", cls.nsfw_model_id),
             nsfw_threshold=float(os.environ.get("FSS_NSFW_THRESHOLD", cls.nsfw_threshold)),
             watermark=_bool("FSS_WATERMARK", cls.watermark),
             output_dir=Path(os.environ.get("FSS_OUTPUT_DIR", str(cls.output_dir))),
-            max_upload_mb=_int("FSS_MAX_UPLOAD_MB", cls.max_upload_mb),
             max_side=_int("FSS_MAX_SIDE", cls.max_side),
             default_steps=_int("FSS_DEFAULT_STEPS", cls.default_steps),
             max_steps=_int("FSS_MAX_STEPS", cls.max_steps),

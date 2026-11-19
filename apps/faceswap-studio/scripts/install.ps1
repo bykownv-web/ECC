@@ -1,4 +1,4 @@
-﻿# FaceSwap Studio - установщик для Windows (PowerShell 5.1+).
+﻿# Image Studio - установщик для Windows (PowerShell 5.1+).
 # Обычно запускается через install.bat двойным щелчком.
 #
 #   install.bat                  - полная установка (PyTorch с CUDA, если есть видеокарта NVIDIA)
@@ -22,7 +22,6 @@ $AppDir = Split-Path -Parent $PSScriptRoot
 $VenvDir = Join-Path $AppDir '.venv'
 $VenvPy = Join-Path $VenvDir 'Scripts\python.exe'
 $ModelsDir = Join-Path $AppDir 'models'
-$SwapModel = Join-Path $ModelsDir 'inswapper_128.onnx'
 $TorchIndexBase = 'https://download.pytorch.org/whl/'
 $PythonDownload = 'https://www.python.org/downloads/release/python-3119/'
 $Total = 6
@@ -113,7 +112,7 @@ function Get-TorchTag([string]$Version) {
 # его вывод и в окне виден прогресс скачивания.
 
 Write-Host '=============================================' -ForegroundColor Cyan
-Write-Host ' FaceSwap Studio - установка' -ForegroundColor Cyan
+Write-Host ' Image Studio - установка' -ForegroundColor Cyan
 Write-Host '=============================================' -ForegroundColor Cyan
 Write-Host ('Папка приложения: ' + $AppDir)
 if ($Mock) {
@@ -169,7 +168,7 @@ foreach ($c in $candidates) {
 
 if (-not $PyExe) {
     if ($tooNew) {
-        Stop-Install ('Найден только Python ' + $tooNew + '. Он слишком новый: для 3.13+ пока нет надёжных сборок PyTorch/onnxruntime.') ('установите Python 3.11 (Windows installer 64-bit): ' + $PythonDownload + ' . При установке отметьте "Add python.exe to PATH". Старый Python удалять не нужно.')
+        Stop-Install ('Найден только Python ' + $tooNew + '. Он слишком новый: для 3.13+ пока нет надёжных сборок PyTorch.') ('установите Python 3.11 (Windows installer 64-bit): ' + $PythonDownload + ' . При установке отметьте "Add python.exe to PATH". Старый Python удалять не нужно.')
     }
     if ($tooOld) {
         Stop-Install ('Найден только Python ' + $tooOld + '. Нужен Python 3.10, 3.11 или 3.12.') ('установите Python 3.11 (Windows installer 64-bit): ' + $PythonDownload + ' . При установке отметьте "Add python.exe to PATH".')
@@ -371,13 +370,6 @@ foreach ($d in @($ModelsDir, (Join-Path $ModelsDir 'checkpoints'), (Join-Path $M
 Write-Ok 'папки models\checkpoints и models\loras на месте'
 
 if (-not $Mock) {
-    if (Test-Path -LiteralPath $SwapModel) {
-        Write-Ok 'модель подмены лица найдена'
-    } else {
-        Write-Warn 'Нет модели подмены лица inswapper_128.onnx (~530 МБ). Скрипт её не скачивает.'
-        Write-Warn ('Положите файл сюда: ' + $SwapModel)
-        $Missing.Add('models\inswapper_128.onnx (нужна только для подмены лица)')
-    }
     $ckpt = @(Get-ChildItem -LiteralPath (Join-Path $ModelsDir 'checkpoints') -Filter '*.safetensors' -ErrorAction SilentlyContinue)
     if ($ckpt.Count -eq 0) {
         Write-Info 'В models\checkpoints пока нет .safetensors - модель по умолчанию скачается при первой генерации (~7 ГБ).'

@@ -1,6 +1,6 @@
 """In-memory background jobs with progress reporting.
 
-A single worker thread runs jobs one at a time: GPU work (generation, face swap) must be
+A single worker thread runs jobs one at a time: GPU work (image generation) must be
 serialized anyway, and a queue lets the UI show "position in queue" instead of a frozen spinner.
 """
 
@@ -15,7 +15,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-log = logging.getLogger("faceswap.jobs")
+log = logging.getLogger("image_studio.jobs")
 
 QUEUED, RUNNING, DONE, ERROR = "queued", "running", "done", "error"
 CANCELLED_CODE = 499

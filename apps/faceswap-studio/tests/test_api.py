@@ -5,7 +5,6 @@ import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from app.backends import NoFaceFound
 from app.config import Settings
 from app.main import create_app
 from app.safety import ContentBlocked, check_prompt
@@ -13,22 +12,12 @@ from app.safety import ContentBlocked, check_prompt
 
 @pytest.fixture
 def settings(tmp_path):
-    return replace(Settings(), backend="mock", output_dir=tmp_path, max_upload_mb=1)
+    return replace(Settings(), backend="mock", output_dir=tmp_path)
 
 
 @pytest.fixture
 def client(settings):
     return TestClient(create_app(settings))
-
-
-def png_bytes(color=(200, 100, 50), size=(256, 256)) -> bytes:
-    buf = io.BytesIO()
-    Image.new("RGB", size, color).save(buf, format="PNG")
-    return buf.getvalue()
-
-
-def files(**named):
-    return {k: (f"{k}.png", v, "image/png") for k, v in named.items()}
 
 
 def test_health(client):
@@ -40,7 +29,7 @@ def test_health(client):
 def test_index_served(client):
     res = client.get("/")
     assert res.status_code == 200
-    assert "FaceSwap Studio" in res.text
+    assert "Image Studio" in res.text
 
 
 def test_generate_returns_watermarked_png_with_metadata(client):
@@ -79,78 +68,6 @@ def test_prompt_filter_allows_benign(prompt):
 def test_prompt_filter_extra_terms():
     with pytest.raises(ContentBlocked):
         check_prompt("photo of Some Celebrity", extra_terms=["some celebrity"])
-
-
-def test_swap_requires_consent(client):
-    res = client.post("/api/swap", files=files(source=png_bytes(), target=png_bytes()))
-    assert res.status_code == 400
-    assert "согласие" in res.json()["detail"]
-
-
-def test_swap_ok(client):
-    res = client.post(
-        "/api/swap",
-        files=files(source=png_bytes((0, 0, 255)), target=png_bytes((255, 0, 0))),
-        data={"consent": "true"},
-    )
-    assert res.status_code == 200, res.text
-    assert res.json()["faces_swapped"] == 1
-    img = Image.open(io.BytesIO(client.get(res.json()["url"]).content)).convert("RGB")
-    # centre now comes from the (blue) source
-    r, g, b = img.getpixel((128, 128))
-    assert b > r
-
-
-def test_swap_rejects_non_image(client):
-    res = client.post(
-        "/api/swap",
-        files={
-            "source": ("a.png", b"not an image", "image/png"),
-            "target": ("b.png", png_bytes(), "image/png"),
-        },
-        data={"consent": "true"},
-    )
-    assert res.status_code == 400
-
-
-def test_swap_rejects_oversized_upload(client):
-    big = b"\x00" * (1024 * 1024 + 10)
-    res = client.post(
-        "/api/swap",
-        files={"source": ("a.png", big, "image/png"), "target": ("b.png", png_bytes(), "image/png")},
-        data={"consent": "true"},
-    )
-    assert res.status_code == 413
-
-
-def test_no_face_maps_to_422(settings):
-    app = create_app(settings)
-
-    def no_face(*_a, **_k):
-        raise NoFaceFound("нет лица")
-
-    app.state.backends.swapper.swap = no_face
-    res = TestClient(app).post(
-        "/api/swap", files=files(source=png_bytes(), target=png_bytes()), data={"consent": "true"}
-    )
-    assert res.status_code == 422
-    assert res.json()["detail"] == "нет лица"
-
-
-def test_generate_swap(client):
-    res = client.post(
-        "/api/generate-swap",
-        files=files(source=png_bytes()),
-        data={"prompt": "knight portrait", "consent": "true", "width": "256", "height": "256", "seed": "3"},
-    )
-    assert res.status_code == 200, res.text
-    assert res.json()["seed"] == 3
-    assert res.json()["faces_swapped"] == 1
-
-
-def test_generate_swap_requires_consent(client):
-    res = client.post("/api/generate-swap", files=files(source=png_bytes()), data={"prompt": "knight"})
-    assert res.status_code == 400
 
 
 @pytest.mark.parametrize("bad_id", ["../secret", "abc", "0" * 31 + "g"])
@@ -238,29 +155,13 @@ def test_generate_rejects_unknown_lora_and_too_many(models_client):
     assert client.post("/api/generate", json={"prompt": "x", "loras": many}).status_code == 400
 
 
-def test_generate_swap_with_model_form_fields(models_client):
-    client, calls = models_client
-    res = client.post(
-        "/api/generate-swap",
-        files=files(source=png_bytes()),
-        data={
-            "prompt": "portrait",
-            "consent": "true",
-            "width": "256",
-            "height": "256",
-            "model": "juggernautXL_ragnarok.safetensors",
-            "loras": '[{"name": "edgCrystalButterflyv1.safetensors", "weight": 1}]',
-        },
-    )
-    assert res.status_code == 200, res.text
-    assert calls[-1].checkpoint.name == "juggernautXL_ragnarok.safetensors"
+@pytest.mark.parametrize(
+    "path", ["/api/swap", "/api/generate-swap", "/api/jobs/swap", "/api/jobs/generate-swap"]
+)
+def test_face_swap_endpoints_removed(client, path):
+    assert client.post(path).status_code in (404, 405)
 
 
-def test_generate_swap_rejects_bad_lora_json(models_client):
-    client, _ = models_client
-    res = client.post(
-        "/api/generate-swap",
-        files=files(source=png_bytes()),
-        data={"prompt": "portrait", "consent": "true", "loras": "{not json"},
-    )
-    assert res.status_code == 400
+def test_health_has_no_face_swap_fields(client):
+    body = client.get("/api/health").json()
+    assert not any("swap" in key for key in body)

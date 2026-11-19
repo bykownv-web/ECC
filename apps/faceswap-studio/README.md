@@ -1,12 +1,11 @@
-# FaceSwap Studio
+# Image Studio
 
-Локальное веб-приложение для генерации изображений по тексту и подмены лиц.
-Все модели работают на вашем компьютере — никакие фото не уходят во внешние сервисы.
+Локальное веб-приложение для генерации изображений по тексту.
+Все модели работают на вашем компьютере — ничего не уходит во внешние сервисы.
 
 - **Генерация** — text-to-image через [diffusers](https://github.com/huggingface/diffusers) (по умолчанию SDXL, подходит любая совместимая модель: SD 1.5, SDXL, SDXL-Turbo, RealVisXL и т.д.).
-- **Подмена лица** — модели InsightFace (`buffalo_l` + `inswapper_128.onnx`), запускаются напрямую через onnxruntime: пакет `insightface` и Visual C++ Build Tools не нужны.
 - **Прогресс** — полоска с шагами генерации, очередь задач и кнопка «Отменить».
-- **Генерация + лицо** — сгенерировать сцену и сразу вставить в неё лицо с фото.
+- **Свои модели** — чекпоинты SDXL / SD 1.5 и LoRA в формате `.safetensors` (например, с Civitai).
 
 ## Быстрый старт для Windows
 
@@ -20,9 +19,9 @@
    определит видеокарту NVIDIA и поставит подходящий PyTorch с CUDA. Первый раз это занимает 10–30 минут
    (скачивается несколько ГБ). В конце будет сводка: какая видеокарта, видит ли её PyTorch и чего не хватает.
    Скрипт можно запускать повторно — готовые шаги пропускаются.
-4. Положите модели (см. ниже [«Модель подмены лица»](#модель-подмены-лица) и [«Свои модели и LoRA»](#свои-модели-и-lora-civitai-и-др)):
-   - `models\inswapper_128.onnx` — для подмены лица (скрипт его не скачивает);
-   - `models\checkpoints\*.safetensors` и `models\loras\*.safetensors` — по желанию.
+4. По желанию положите свои модели (см. [«Свои модели и LoRA»](#свои-модели-и-lora-civitai-и-др)):
+   `models\checkpoints\*.safetensors` и `models\loras\*.safetensors`. Без них при первой
+   генерации скачается SDXL с Hugging Face (~7 ГБ).
 5. Дважды щёлкните **`run.bat`** — браузер откроет <http://127.0.0.1:8000>, когда сервер будет готов.
    Чтобы остановить приложение, закройте чёрное окно.
 
@@ -46,13 +45,12 @@
 
 В приложение встроены защитные меры. Не отключайте их без веской причины:
 
-- для подмены лица обязательна галочка о согласии человека, чьё лицо используется;
 - на каждый результат ставится видимая метка `AI-generated`, а в PNG пишутся метаданные `ai_generated=true`;
 - промпты с сексуальным контентом и упоминанием несовершеннолетних отклоняются;
 - результаты проверяются NSFW-классификатором (`Falconsai/nsfw_image_detection`).
 
-Запрещено использовать приложение для интимных изображений без согласия, мошенничества,
-дезинформации, травли и выдачи себя за другого человека. Во многих странах это уголовно наказуемо.
+Запрещено использовать приложение для изображений реальных людей без их согласия, мошенничества,
+дезинформации и травли. Во многих странах это уголовно наказуемо.
 
 ## Требования
 
@@ -75,22 +73,6 @@ pip install torch --index-url https://download.pytorch.org/whl/cu124
 # 2. Остальные зависимости
 pip install -r requirements-gpu.txt
 ```
-
-### Модель подмены лица
-
-Файл `inswapper_128.onnx` (~530 МБ) не скачивается автоматически. Положите его в
-`models/inswapper_128.onnx` или укажите путь через `FSS_SWAP_MODEL_PATH`.
-Модели InsightFace (`inswapper_128`, `buffalo_l`) распространяются **только для некоммерческого
-исследовательского использования** — проверьте лицензию перед применением.
-Детектор и распознаватель лиц (`det_10g.onnx`, `w600k_r50.onnx` из официального архива `buffalo_l`,
-~280 МБ) скачиваются сами при первой подмене лица в `models/buffalo_l/`. Если у вас уже есть
-`~/.insightface/models/buffalo_l`, используется он. Если скачивание не удалось, скачайте вручную
-<https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip> и распакуйте эти
-два файла в `models/buffalo_l/`.
-
-Подмена лица работает на видеокарте NVIDIA через `onnxruntime-gpu`. Для AMD/Intel на Windows
-поставьте `onnxruntime-directml` вместо `onnxruntime-gpu`. Не ставьте `onnxruntime` и
-`onnxruntime-gpu` одновременно.
 
 Модель генерации скачивается с Hugging Face при первом запросе (в `~/.cache/huggingface`).
 
@@ -138,20 +120,18 @@ FSS_BACKEND=mock python -m app.main
 | `FSS_DEVICE` | `auto` | `cuda`, `mps`, `cpu` или `auto` |
 | `FSS_CHECKPOINTS_DIR` | `models/checkpoints/` | Папка с локальными чекпоинтами `.safetensors` |
 | `FSS_LORAS_DIR` | `models/loras/` | Папка с LoRA `.safetensors` |
-| `FSS_SWAP_MODEL_PATH` | `models/inswapper_128.onnx` | Путь к модели подмены лица |
 | `FSS_NSFW_MODEL` | `Falconsai/nsfw_image_detection` | NSFW-классификатор (пустая строка — выключить) |
 | `FSS_NSFW_THRESHOLD` | `0.7` | Порог NSFW-классификатора |
 | `FSS_LOWVRAM` | `auto` | Экономия видеопамяти (CPU offload + VAE tiling): `auto` включает при < 10 ГБ, `on`, `off` |
 | `FSS_MOCK_DELAY` | `0` | Секунд на «шаг» в mock-режиме (чтобы увидеть полоску прогресса) |
 | `FSS_WATERMARK` | `1` | Видимая метка `AI-generated` |
 | `FSS_OUTPUT_DIR` | `outputs/` | Куда сохраняются результаты |
-| `FSS_MAX_UPLOAD_MB` | `10` | Максимальный размер загружаемого файла |
 | `FSS_MAX_SIDE` | `1536` | Максимальная сторона изображения |
 | `FSS_DEFAULT_STEPS` / `FSS_MAX_STEPS` | `30` / `80` | Шаги диффузии |
 | `FSS_BLOCKED_TERMS` | — | Дополнительные запрещённые слова через запятую |
 
 Пример быстрой генерации (4 шага): `FSS_MODEL_ID=stabilityai/sdxl-turbo FSS_DEFAULT_STEPS=4`
-(на вкладке генерации поставьте CFG = 0).
+(в интерфейсе поставьте CFG = 0).
 
 ## API
 
@@ -160,34 +140,28 @@ FSS_BACKEND=mock python -m app.main
 | `GET` | `/api/health` | — |
 | `GET` | `/api/models` | — (список чекпоинтов и LoRA) |
 | `POST` | `/api/generate` | JSON: `prompt`, `negative_prompt`, `width`, `height`, `steps`, `guidance`, `seed`, `model`, `loras: [{name, weight}]` |
-| `POST` | `/api/swap` | multipart: `source`, `target`, `consent=true`, `all_faces` |
-| `POST` | `/api/generate-swap` | multipart: `source`, `prompt`, `consent=true`, + параметры генерации, `loras` как JSON-строка |
 | `GET` | `/api/images/{id}` | — (PNG) |
 | `DELETE` | `/api/images/{id}` | — |
-| `POST` | `/api/jobs/generate`, `/api/jobs/swap`, `/api/jobs/generate-swap` | как у обычных эндпоинтов; ответ `202 {"job_id": ...}` |
+| `POST` | `/api/jobs/generate` | как `/api/generate`; ответ `202 {"job_id": ...}` |
 | `GET` | `/api/jobs/{job_id}` | — (`status`, `stage`, `progress` 0..1, `queue_position`, `result`, `error`) |
 | `POST` | `/api/jobs/{job_id}/cancel` | — |
 
 Задачи выполняются по одной (видеокарта одна) и хранятся в памяти: последние 100, до перезапуска.
 `status`: `queued`, `running`, `done` или `error` (код `499` значит «отменено»).
-Обычные эндпоинты (`/api/generate` и т.д.) тоже работают и стоят в той же очереди.
+Обычный `/api/generate` тоже работает и стоит в той же очереди.
 
 ```bash
 curl -X POST localhost:8000/api/generate -H 'Content-Type: application/json' \
   -d '{"prompt": "lighthouse at dusk, oil painting", "seed": 1}'
-
-curl -X POST localhost:8000/api/swap \
-  -F source=@me.jpg -F target=@scene.jpg -F consent=true
 ```
 
 ## Структура
 
 ```text
 app/
-  main.py      — FastAPI: маршруты, загрузка файлов, сохранение результатов
+  main.py      — FastAPI: маршруты, проверка запросов, сохранение результатов
   jobs.py      — очередь задач с прогрессом и отменой
-  backends.py  — DiffusersGenerator (HF / .safetensors + LoRA, low-VRAM), InsightFaceSwapper, mock
-  face_engine.py — детекция, распознавание и подмена лица на onnxruntime
+  backends.py  — DiffusersGenerator (HF / .safetensors + LoRA, low-VRAM) и mock
   registry.py  — поиск локальных моделей и безопасное разрешение имён файлов
   safety.py    — фильтр промптов, NSFW-проверка, водяной знак, метаданные
   config.py    — настройки из переменных окружения

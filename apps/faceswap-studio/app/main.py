@@ -3,29 +3,24 @@
 from __future__ import annotations
 
 import inspect
-import io
-import json
 import logging
 import re
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from PIL import Image, ImageOps, UnidentifiedImageError
-from pydantic import BaseModel, Field, ValidationError
-from starlette.concurrency import run_in_threadpool
+from PIL import Image
+from pydantic import BaseModel, Field
 
 from . import __version__
 from .backends import (
     Backends,
     BackendUnavailable,
     GenerateParams,
-    NoFaceFound,
     build_backends,
 )
 from .config import Settings
@@ -39,16 +34,12 @@ from .safety import (
     provenance_metadata,
 )
 
-log = logging.getLogger("faceswap")
+log = logging.getLogger("image_studio")
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 IMAGE_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 JOB_ID_RE = IMAGE_ID_RE
-STAGE_SWAP = "Подмена лица…"
 STAGE_SAVE = "Проверка и сохранение…"
 INTERNAL_ERROR = "Внутренняя ошибка сервера. Подробности в журнале сервера."
-CONSENT_ERROR = (
-    "Подтвердите, что у вас есть согласие человека, чьё лицо используется, или что это ваше собственное лицо."
-)
 
 
 class LoraSpec(BaseModel):
@@ -73,7 +64,6 @@ class ImageResult(BaseModel):
     id: str
     url: str
     seed: int | None = None
-    faces_swapped: int | None = None
 
 
 class JobAccepted(BaseModel):
@@ -90,7 +80,7 @@ class JobSpec:
 
 def map_job_error(exc: Exception) -> JobError:
     """Same status codes as the exception handlers of the blocking endpoints."""
-    if isinstance(exc, (ContentBlocked, NoFaceFound)):
+    if isinstance(exc, ContentBlocked):
         return JobError(422, str(exc))
     if isinstance(exc, BackendUnavailable):
         return JobError(503, str(exc))
@@ -121,7 +111,7 @@ def create_app(settings: Settings | None = None, backends: Backends | None = Non
         backends.device,
     )
 
-    app = FastAPI(title="FaceSwap Studio", version=__version__)
+    app = FastAPI(title="Image Studio", version=__version__)
     app.state.settings = settings
     app.state.backends = backends
     jobs = JobManager(error_mapper=map_job_error)
@@ -133,22 +123,6 @@ def create_app(settings: Settings | None = None, backends: Backends | None = Non
         """Clamp to max_side and round down to a multiple of 8 (diffusers requirement)."""
         return max(256, min(value, settings.max_side)) // 8 * 8
 
-    async def read_image(upload: UploadFile, label: str) -> Image.Image:
-        limit = settings.max_upload_mb * 1024 * 1024
-        data = await upload.read(limit + 1)
-        if len(data) > limit:
-            raise HTTPException(413, f"{label}: файл больше {settings.max_upload_mb} МБ.")
-        try:
-            img = Image.open(io.BytesIO(data))
-            img.verify()
-            img = Image.open(io.BytesIO(data))
-            img = ImageOps.exif_transpose(img).convert("RGB")
-        except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as exc:
-            raise HTTPException(400, f"{label}: не удалось прочитать изображение.") from exc
-        if max(img.size) > settings.max_side:
-            img.thumbnail((settings.max_side, settings.max_side))
-        return img
-
     def save(img: Image.Image, kind: str, prompt: str | None = None) -> str:
         nsfw.check(img)
         img = apply_watermark(img, visible=settings.watermark)
@@ -159,15 +133,6 @@ def create_app(settings: Settings | None = None, backends: Backends | None = Non
             pnginfo=provenance_metadata(kind, prompt),
         )
         return image_id
-
-    def parse_loras(raw: str) -> list[LoraSpec]:
-        try:
-            data = json.loads(raw or "[]")
-            if not isinstance(data, list):
-                raise ValueError
-            return [LoraSpec.model_validate(item) for item in data]
-        except (ValueError, ValidationError) as exc:
-            raise HTTPException(400, "Поле loras: ожидается JSON-список {name, weight}.") from exc
 
     def build_params(req: GenerateRequest) -> GenerateParams:
         """All synchronous validation of a generation request (prompt policy, model, LoRA)."""
@@ -218,67 +183,6 @@ def create_app(settings: Settings | None = None, backends: Backends | None = Non
 
         return JobSpec("generate", work)
 
-    async def swap_spec(
-        source: Annotated[UploadFile, File(description="Фото с лицом-источником")],
-        target: Annotated[UploadFile, File(description="Изображение, куда вставить лицо")],
-        consent: Annotated[bool, Form()] = False,
-        all_faces: Annotated[bool, Form()] = False,
-    ) -> JobSpec:
-        if not consent:
-            raise HTTPException(400, CONSENT_ERROR)
-        src = await read_image(source, "Источник")
-        dst = await read_image(target, "Цель")
-
-        def work(ctx: JobContext) -> dict:
-            ctx.report(STAGE_SWAP, 0.1)
-            img, count = backends.swapper.swap(src, dst, all_faces)
-            ctx.report(STAGE_SAVE, 0.9)
-            image_id = save(img, "swap")
-            return result(image_id, faces_swapped=count)
-
-        return JobSpec("swap", work)
-
-    async def generate_swap_spec(
-        source: Annotated[UploadFile, File(description="Фото с лицом-источником")],
-        prompt: Annotated[str, Form(min_length=1, max_length=1000)],
-        consent: Annotated[bool, Form()] = False,
-        negative_prompt: Annotated[str, Form(max_length=1000)] = "",
-        width: Annotated[int, Form(ge=256, le=2048)] = 1024,
-        height: Annotated[int, Form(ge=256, le=2048)] = 1024,
-        steps: Annotated[int | None, Form(ge=1)] = None,
-        guidance: Annotated[float, Form(ge=0.0, le=20.0)] = 7.0,
-        seed: Annotated[int | None, Form(ge=0, le=2**32 - 1)] = None,
-        model: Annotated[str | None, Form(max_length=255)] = None,
-        loras: Annotated[
-            str, Form(max_length=4000, description='JSON: [{"name": ..., "weight": ...}]')
-        ] = "[]",
-    ) -> JobSpec:
-        if not consent:
-            raise HTTPException(400, CONSENT_ERROR)
-        src = await read_image(source, "Источник")
-        req = GenerateRequest(
-            prompt=prompt,
-            negative_prompt=negative_prompt,
-            width=width,
-            height=height,
-            steps=steps,
-            guidance=guidance,
-            seed=seed,
-            model=model or None,
-            loras=parse_loras(loras),
-        )
-        params = build_params(req)
-
-        def work(ctx: JobContext) -> dict:
-            generated, used_seed = run_generator(params, ctx.scaled(0.0, 0.8))
-            ctx.report(STAGE_SWAP, 0.85)
-            img, count = backends.swapper.swap(src, generated, False)
-            ctx.report(STAGE_SAVE, 0.95)
-            image_id = save(img, "generate-swap", params.prompt)
-            return result(image_id, seed=used_seed, faces_swapped=count)
-
-        return JobSpec("generate-swap", work)
-
     def run_blocking(spec: JobSpec) -> ImageResult:
         """Blocking endpoints share the job queue, so GPU work stays serialized for both APIs."""
         job = jobs.submit(spec.kind, spec.fn)
@@ -302,10 +206,6 @@ def create_app(settings: Settings | None = None, backends: Backends | None = Non
     async def _blocked(_, exc: ContentBlocked):
         return JSONResponse(status_code=422, content={"detail": str(exc)})
 
-    @app.exception_handler(NoFaceFound)
-    async def _noface(_, exc: NoFaceFound):
-        return JSONResponse(status_code=422, content={"detail": str(exc)})
-
     @app.exception_handler(BackendUnavailable)
     async def _unavailable(_, exc: BackendUnavailable):
         return JSONResponse(status_code=503, content={"detail": str(exc)})
@@ -320,7 +220,6 @@ def create_app(settings: Settings | None = None, backends: Backends | None = Non
             "backend": backends.name,
             "device": backends.device,
             "model": settings.model_id if backends.name != "mock" else "mock",
-            "swap_model_present": backends.name == "mock" or settings.swap_model_path.is_file(),
             "watermark": settings.watermark,
             "lowvram": settings.lowvram,
             "lowvram_active": getattr(backends.generator, "lowvram_active", None),
@@ -336,37 +235,17 @@ def create_app(settings: Settings | None = None, backends: Backends | None = Non
             "loras": list_models(settings.loras_dir),
         }
 
-    # FastAPI dependencies: parse + validate multipart input synchronously
-    swap_inputs = Depends(swap_spec)
-    generate_swap_inputs = Depends(generate_swap_spec)
-
     # blocking API: waits for the result
 
     @app.post("/api/generate", response_model=ImageResult)
     def generate(req: GenerateRequest) -> ImageResult:
         return run_blocking(generate_spec(req))
 
-    @app.post("/api/swap", response_model=ImageResult)
-    async def swap(spec: JobSpec = swap_inputs) -> ImageResult:
-        return await run_in_threadpool(run_blocking, spec)
-
-    @app.post("/api/generate-swap", response_model=ImageResult)
-    async def generate_swap(spec: JobSpec = generate_swap_inputs) -> ImageResult:
-        return await run_in_threadpool(run_blocking, spec)
-
     # background jobs: same inputs and validation, then poll GET /api/jobs/{id}
 
     @app.post("/api/jobs/generate", response_model=JobAccepted, status_code=202)
     def job_generate(req: GenerateRequest) -> JobAccepted:
         return accepted(generate_spec(req))
-
-    @app.post("/api/jobs/swap", response_model=JobAccepted, status_code=202)
-    async def job_swap(spec: JobSpec = swap_inputs) -> JobAccepted:
-        return accepted(spec)
-
-    @app.post("/api/jobs/generate-swap", response_model=JobAccepted, status_code=202)
-    async def job_generate_swap(spec: JobSpec = generate_swap_inputs) -> JobAccepted:
-        return accepted(spec)
 
     @app.get("/api/jobs/{job_id}")
     def job_status(job_id: str) -> dict:
@@ -400,7 +279,7 @@ def run() -> None:
 
     import uvicorn
 
-    parser = argparse.ArgumentParser(description="FaceSwap Studio")
+    parser = argparse.ArgumentParser(description="Image Studio")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()

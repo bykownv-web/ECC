@@ -1,3 +1,3 @@
-"""FaceSwap Studio: local image generation and face swapping."""
+"""Image Studio: local text-to-image generation."""
 
 __version__ = "0.1.0"

@@ -3,25 +3,18 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>FaceSwap Studio</title>
+  <title>Image Studio</title>
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
   <header>
-    <h1>FaceSwap Studio</h1>
+    <h1>Image Studio</h1>
     <span id="status" class="status">Проверка сервера…</span>
   </header>
 
-  <nav class="tabs" role="tablist">
-    <button class="tab active" data-tab="generate" role="tab">Генерация</button>
-    <button class="tab" data-tab="swap" role="tab">Подмена лица</button>
-    <button class="tab" data-tab="combo" role="tab">Генерация + лицо</button>
-  </nav>
-
   <main>
     <section class="panel">
-      <!-- Генерация -->
-      <form id="form-generate" class="tab-pane active" data-pane="generate">
+      <form id="form-generate" class="gen-form">
         <label>Промпт
           <textarea name="prompt" rows="3" required maxlength="1000"
             placeholder="portrait of an astronaut in a sunflower field, golden hour, 35mm photo"></textarea>
@@ -46,56 +39,6 @@
         <button type="submit">Сгенерировать</button>
       </form>
 
-      <!-- Подмена лица -->
-      <form id="form-swap" class="tab-pane" data-pane="swap">
-        <div class="grid two">
-          <label class="drop">Лицо-источник
-            <input name="source" type="file" accept="image/*" required>
-            <img class="preview" alt="">
-          </label>
-          <label class="drop">Целевое изображение
-            <input name="target" type="file" accept="image/*" required>
-            <img class="preview" alt="">
-          </label>
-        </div>
-        <label class="check"><input name="all_faces" type="checkbox"> Заменить все лица на изображении</label>
-        <label class="check consent"><input name="consent" type="checkbox" required>
-          Я подтверждаю, что это моё лицо или у меня есть согласие человека на использование его изображения.
-        </label>
-        <button type="submit">Заменить лицо</button>
-      </form>
-
-      <!-- Генерация + лицо -->
-      <form id="form-combo" class="tab-pane" data-pane="combo">
-        <label class="drop">Лицо-источник
-          <input name="source" type="file" accept="image/*" required>
-          <img class="preview" alt="">
-        </label>
-        <label>Промпт (опишите сцену с одним человеком)
-          <textarea name="prompt" rows="3" required maxlength="1000"
-            placeholder="a knight in shining armor, castle background, cinematic lighting, portrait"></textarea>
-        </label>
-        <label>Негативный промпт
-          <input name="negative_prompt" maxlength="1000" placeholder="blurry, low quality, deformed">
-        </label>
-        <div class="model-block">
-          <label>Модель
-            <select name="model"><option value="">По умолчанию</option></select>
-          </label>
-          <div class="loras"></div>
-          <button type="button" class="secondary add-lora">+ LoRA</button>
-        </div>
-        <div class="grid">
-          <label>Ширина <input name="width" type="number" value="1024" min="256" max="2048" step="64"></label>
-          <label>Высота <input name="height" type="number" value="1024" min="256" max="2048" step="64"></label>
-          <label>Шаги <input name="steps" type="number" value="30" min="1" max="80"></label>
-          <label>Seed <input name="seed" type="number" min="0" placeholder="случайный"></label>
-        </div>
-        <label class="check consent"><input name="consent" type="checkbox" required>
-          Я подтверждаю, что это моё лицо или у меня есть согласие человека на использование его изображения.
-        </label>
-        <button type="submit">Создать</button>
-      </form>
     </section>
 
     <section class="panel result">
@@ -126,7 +69,7 @@
 
   <footer>
     Все результаты помечаются как созданные ИИ. Не используйте приложение для обмана,
-    травли, интимных изображений или выдачи себя за другого человека.
+    травли и изображений реальных людей без их согласия.
   </footer>
   <template id="lora-row">
     <div class="lora-row">

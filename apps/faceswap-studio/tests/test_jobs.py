@@ -9,7 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from app.backends import BackendUnavailable, NoFaceFound
+from app.backends import BackendUnavailable
 from app.config import Settings
 from app.jobs import CANCELLED_CODE, DONE, ERROR, JobCancelled, JobError, JobManager
 from app.main import create_app
@@ -19,22 +19,12 @@ TIMEOUT = 10.0
 
 @pytest.fixture
 def app(tmp_path):
-    return create_app(replace(Settings(), backend="mock", output_dir=tmp_path, max_upload_mb=1))
+    return create_app(replace(Settings(), backend="mock", output_dir=tmp_path))
 
 
 @pytest.fixture
 def client(app):
     return TestClient(app)
-
-
-def png_bytes(color=(200, 100, 50), size=(256, 256)) -> bytes:
-    buf = io.BytesIO()
-    Image.new("RGB", size, color).save(buf, format="PNG")
-    return buf.getvalue()
-
-
-def files(**named):
-    return {k: (f"{k}.png", v, "image/png") for k, v in named.items()}
 
 
 def poll(client, job_id, until=("done", "error"), stage=None):
@@ -196,67 +186,6 @@ def test_generate_job_bad_model_and_validation(client):
         == 400
     )
     assert client.post("/api/jobs/generate", json={"prompt": ""}).status_code == 422
-
-
-def test_swap_job_requires_consent_synchronously(app, client):
-    res = client.post("/api/jobs/swap", files=files(source=png_bytes(), target=png_bytes()))
-    assert res.status_code == 400
-    assert "согласие" in res.json()["detail"]
-    res = client.post("/api/jobs/generate-swap", files=files(source=png_bytes()), data={"prompt": "knight"})
-    assert res.status_code == 400
-    assert not app.state.jobs._jobs
-
-
-def test_swap_job_rejects_oversized_and_blocked(client):
-    big = b"\x00" * (1024 * 1024 + 10)
-    res = client.post(
-        "/api/jobs/swap",
-        files={"source": ("a.png", big, "image/png"), "target": ("b.png", png_bytes(), "image/png")},
-        data={"consent": "true"},
-    )
-    assert res.status_code == 413
-    res = client.post(
-        "/api/jobs/generate-swap",
-        files=files(source=png_bytes()),
-        data={"prompt": "nude portrait", "consent": "true"},
-    )
-    assert res.status_code == 422
-
-
-def test_swap_job_ok(client):
-    res = client.post(
-        "/api/jobs/swap",
-        files=files(source=png_bytes((0, 0, 255)), target=png_bytes((255, 0, 0))),
-        data={"consent": "true"},
-    )
-    assert res.status_code == 202, res.text
-    body = poll(client, res.json()["job_id"])
-    assert body["status"] == "done" and body["result"]["faces_swapped"] == 1
-
-
-def test_generate_swap_job_ok(client):
-    res = client.post(
-        "/api/jobs/generate-swap",
-        files=files(source=png_bytes()),
-        data={"prompt": "knight portrait", "consent": "true", "width": "256", "height": "256", "seed": "3"},
-    )
-    assert res.status_code == 202, res.text
-    body = poll(client, res.json()["job_id"])
-    assert body["status"] == "done", body
-    assert body["result"]["seed"] == 3 and body["result"]["faces_swapped"] == 1
-
-
-def test_no_face_job_gives_422(app, client):
-    def no_face(*_a, **_k):
-        raise NoFaceFound("нет лица")
-
-    app.state.backends.swapper.swap = no_face
-    res = client.post(
-        "/api/jobs/swap", files=files(source=png_bytes(), target=png_bytes()), data={"consent": "true"}
-    )
-    body = poll(client, res.json()["job_id"])
-    assert body["status"] == "error"
-    assert body["error"] == {"code": 422, "detail": "нет лица"}
 
 
 @pytest.mark.parametrize(

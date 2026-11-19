@@ -21,26 +21,6 @@
     history: $("#history"),
   };
 
-  // Tabs
-  $$(".tab").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      $$(".tab").forEach((b) => b.classList.toggle("active", b === btn));
-      $$(".tab-pane").forEach((p) => p.classList.toggle("active", p.dataset.pane === btn.dataset.tab));
-    });
-  });
-
-  // File previews
-  $$('input[type="file"]').forEach((input) => {
-    input.addEventListener("change", () => {
-      const preview = input.parentElement.querySelector(".preview");
-      const file = input.files && input.files[0];
-      if (!preview) return;
-      if (preview.src) URL.revokeObjectURL(preview.src);
-      if (file) preview.src = URL.createObjectURL(file);
-      else preview.removeAttribute("src");
-    });
-  });
-
   // Health (also re-read after each job: architecture of the loaded model, low-VRAM mode)
   function refreshHealth() {
     return fetch("/api/health", { cache: "no-store" })
@@ -50,9 +30,8 @@
         if (h.lowvram_active) parts.push("режим экономии видеопамяти");
         if (h.architecture === "sd15") parts.push("модель SD 1.5: лучше 512×512");
         else if (h.architecture === "sdxl") parts.push("модель SDXL: 1024×1024");
-        if (!h.swap_model_present) parts.push("модель подмены лица не найдена");
         els.status.textContent = parts.join(" · ");
-        els.status.className = "status " + (h.swap_model_present ? "ok" : "bad");
+        els.status.className = "status ok";
       })
       .catch(() => {
         els.status.textContent = "Сервер недоступен";
@@ -108,7 +87,6 @@
     els.download.href = data.url;
     const parts = [];
     if (data.seed != null) parts.push(`seed ${data.seed}`);
-    if (data.faces_swapped != null) parts.push(`лиц заменено: ${data.faces_swapped}`);
     els.meta.textContent = parts.join(" · ");
     els.result.hidden = false;
 
@@ -182,29 +160,22 @@
     } catch (_) { /* polling reports the final state */ }
   });
 
-  function buildRequest(form, asJson) {
-    const fd = new FormData(form);
-    if (asJson) {
-      const body = {};
-      for (const [k, v] of fd.entries()) {
-        if (v === "" || k.startsWith("lora_")) continue;
-        body[k] = ["width", "height", "steps", "seed"].includes(k) ? parseInt(v, 10)
-          : k === "guidance" ? parseFloat(v) : v;
-      }
-      body.loras = collectLoras(form);
-      return { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
+  function buildRequest(form) {
+    const body = {};
+    for (const [k, v] of new FormData(form).entries()) {
+      if (v === "" || k.startsWith("lora_")) continue;
+      body[k] = ["width", "height", "steps", "seed"].includes(k) ? parseInt(v, 10)
+        : k === "guidance" ? parseFloat(v) : v;
     }
-    for (const [k, v] of Array.from(fd.entries())) if (v === "" || k.startsWith("lora_")) fd.delete(k);
-    if ($(".model-block", form)) fd.set("loras", JSON.stringify(collectLoras(form)));
-    $$('input[type="checkbox"]', form).forEach((cb) => fd.set(cb.name, cb.checked ? "true" : "false"));
-    return { method: "POST", body: fd };
+    body.loras = collectLoras(form);
+    return { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
   }
 
-  async function submit(form, url, asJson) {
+  async function submit(form, url) {
     if (activeJob) return;
     setBusy(form, true);
     try {
-      const res = await fetch(url, buildRequest(form, asJson));
+      const res = await fetch(url, buildRequest(form));
       if (!res.ok) throw new Error(await errorText(res));
       const { job_id: jobId } = await res.json();
       activeJob = jobId;
@@ -219,7 +190,5 @@
     }
   }
 
-  $("#form-generate").addEventListener("submit", (e) => { e.preventDefault(); submit(e.target, "/api/jobs/generate", true); });
-  $("#form-swap").addEventListener("submit", (e) => { e.preventDefault(); submit(e.target, "/api/jobs/swap", false); });
-  $("#form-combo").addEventListener("submit", (e) => { e.preventDefault(); submit(e.target, "/api/jobs/generate-swap", false); });
+  $("#form-generate").addEventListener("submit", (e) => { e.preventDefault(); submit(e.target, "/api/jobs/generate"); });
 })();

@@ -15,7 +15,6 @@ from app.backends import (
     BackendUnavailable,
     DiffusersGenerator,
     GenerateParams,
-    MockSwapper,
 )
 from app.config import Settings
 from app.jobs import JobCancelled
@@ -294,7 +293,7 @@ def test_health_and_jobs_with_diffusers_generator(fake_modules, tmp_path):
     sys.modules["torch"].vram_bytes = 8 * 2**30
     gen = DiffusersGenerator("org/model", "cuda")
     settings = replace(Settings(), backend="diffusers", nsfw_model_id="", output_dir=tmp_path)
-    client = TestClient(create_app(settings, Backends("diffusers", "cuda", gen, MockSwapper())))
+    client = TestClient(create_app(settings, Backends("diffusers", "cuda", gen)))
     assert client.get("/api/health").json()["lowvram_active"] is True
     job_id = client.post("/api/jobs/generate", json={"prompt": "x", "width": 256, "height": 256, "steps": 2})
     job_id = job_id.json()["job_id"]
@@ -310,7 +309,7 @@ def test_oom_job_reports_503_hint(fake_modules, tmp_path, monkeypatch):
     monkeypatch.setattr(FakePipe, "oom", True)
     gen = DiffusersGenerator("org/model", "cuda", lowvram="off")
     settings = replace(Settings(), backend="diffusers", nsfw_model_id="", output_dir=tmp_path)
-    client = TestClient(create_app(settings, Backends("diffusers", "cuda", gen, MockSwapper())))
+    client = TestClient(create_app(settings, Backends("diffusers", "cuda", gen)))
     job_id = client.post("/api/jobs/generate", json={"prompt": "x", "width": 256, "height": 256}).json()[
         "job_id"
     ]

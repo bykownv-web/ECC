@@ -8,7 +8,7 @@ from collections.abc import Iterable
 
 from PIL import Image, ImageDraw, ImageFont, PngImagePlugin
 
-log = logging.getLogger("faceswap.safety")
+log = logging.getLogger("image_studio.safety")
 
 WATERMARK_TEXT = "AI-generated"
 
@@ -125,7 +125,7 @@ def apply_watermark(image: Image.Image, visible: bool = True) -> Image.Image:
 def provenance_metadata(kind: str, prompt: str | None = None) -> PngImagePlugin.PngInfo:
     info = PngImagePlugin.PngInfo()
     info.add_text("ai_generated", "true")
-    info.add_text("generator", "faceswap-studio")
+    info.add_text("generator", "image-studio")
     info.add_text("operation", kind)
     if prompt:
         info.add_text("prompt", prompt[:1000])
