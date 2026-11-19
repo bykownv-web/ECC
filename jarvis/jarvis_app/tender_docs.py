@@ -284,13 +284,24 @@ def documents_page_url(purchase_url: str) -> str:
     return parsed._replace(path=path).geturl()
 
 
+# html.parser превращает «&not», «&para» и т.п. внутри href без «;» в символы: «&noticeGuid» → «¬iceGuid».
+_ENTITY_FIX = {"¬": "&not", "¶": "&para", "©": "&copy", "®": "&reg", "§": "&sect", "¢": "&cent",
+               "£": "&pound", "¤": "&curren", "µ": "&micro", "¥": "&yen", "°": "&deg"}
+
+
+def fix_href(href: str) -> str:
+    for char, entity in _ENTITY_FIX.items():
+        href = href.replace(char, entity)
+    return href
+
+
 def parse_document_links(html: str, page_url: str) -> list[tuple[str, str]]:
     """Ссылки на файлы закупки: (имя файла, адрес)."""
     soup = BeautifulSoup(html, "html.parser")
     found: list[tuple[str, str]] = []
     seen: set[str] = set()
     for link in soup.find_all("a", href=True):
-        href = link["href"]
+        href = fix_href(link["href"])
         # Ссылки на просмотр электронной подписи (signview/listModal) — не файлы.
         if re.search(r"(signview|listModal|/sign/|printForm)", href, re.I):
             continue
@@ -310,7 +321,7 @@ def find_documents_tab(card_html: str, card_url: str) -> str | None:
     """Ссылка на вкладку «Документы» из карточки закупки (у 223-ФЗ в ней внутренний код, а не номер)."""
     soup = BeautifulSoup(card_html, "html.parser")
     for link in soup.find_all("a", href=True):
-        href = link["href"]
+        href = fix_href(link["href"])
         text = link.get_text(" ", strip=True).lower()
         if "documents" in href.lower() and ".html" in href.lower() or text == "документы":
             url = urljoin(card_url, href)
@@ -319,38 +330,47 @@ def find_documents_tab(card_html: str, card_url: str) -> str | None:
     return None
 
 
-def fetch_eis_documents(client: ProcurementClient, purchase_url: str, dest: Path) -> list[Path]:
+def locate_documents(client: ProcurementClient, purchase_url: str) -> tuple[str, list[tuple[str, str]], list[str]]:
+    """Ищет файлы закупки. Возвращает (страница, где нашлись, ссылки, журнал попыток)."""
+    tried: list[str] = []
     card_html = ""
     try:
         card_html = client.get_text(purchase_url)
-    except ProcurementError:
-        pass
-    candidates = []
+        tried.append(f"карточка: OK ({purchase_url})")
+    except ProcurementError as exc:
+        tried.append(f"карточка: {exc} ({purchase_url})")
+    candidates: list[str] = []
     tab = find_documents_tab(card_html, purchase_url) if card_html else None
     if tab:
         candidates.append(tab)
     guessed = documents_page_url(purchase_url)
     if guessed not in candidates:
         candidates.append(guessed)
-    links: list[tuple[str, str]] = []
     last_error: ProcurementError | None = None
     for page_url in candidates:
         try:
             links = parse_document_links(client.get_text(page_url), page_url)
         except ProcurementError as exc:
             last_error = exc
+            tried.append(f"{exc} ({page_url})")
             continue
+        tried.append(f"файлов: {len(links)} ({page_url})")
         if links:
-            break
-    if not links and card_html:
+            return page_url, links, tried
+    if card_html:
         links = parse_document_links(card_html, purchase_url)  # некоторые карточки сразу содержат файлы
-    if not links:
-        if last_error is not None and not card_html:
-            raise last_error
-        raise ProcurementError(
-            "На странице документов закупки не нашлось файлов. Скачайте ТЗ с сайта вручную "
-            "и добавьте кнопкой «Выбрать файлы»."
-        )
+        if links:
+            return purchase_url, links, tried
+    if last_error is not None and not card_html:
+        raise last_error
+    raise ProcurementError(
+        "На странице документов закупки не нашлось файлов. Скачайте ТЗ с сайта вручную "
+        "и добавьте кнопкой «Выбрать файлы»."
+    )
+
+
+def fetch_eis_documents(client: ProcurementClient, purchase_url: str, dest: Path) -> list[Path]:
+    _, links, _ = locate_documents(client, purchase_url)
     dest.mkdir(parents=True, exist_ok=True)
     saved: list[Path] = []
     for name, url in links:

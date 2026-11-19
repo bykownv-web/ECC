@@ -110,22 +110,17 @@ def main() -> int:
             log(f"       (служебно: карточек поиска на странице {len(parsed)})")
         except Exception as exc:
             log.fail(f"карточка: {exc}")
-        docs_url = (tender_docs.find_documents_tab(card, url) if card else None) or tender_docs.documents_page_url(url)
-        log(f"страница документов: {docs_url}")
         try:
-            html = client.get_text(docs_url)
-            (out / "documents.html").write_text(html, encoding="utf-8")
-            links = tender_docs.parse_document_links(html, docs_url)
-            if links:
-                log.ok(f"найдено файлов: {len(links)}")
-                for name, link in links:
-                    log(f"       • {name}  ←  {link}")
-            else:
-                log.fail("на странице документов не найдено ссылок на файлы (страница сохранена в documents.html)")
+            docs_url, links, tried = tender_docs.locate_documents(client, url)
+            for line in tried:
+                log(f"       попытка: {line}")
+            log.ok(f"страница с файлами: {docs_url}")
+            log.ok(f"найдено файлов: {len(links)}")
+            for name, link in links:
+                log(f"       • {name}  ←  {link}")
             t = time.time()
-            files = tender_docs.fetch_eis_documents(client, url, out / "files") if links else []
-            if files:
-                log.ok(f"скачано файлов: {len(files)} за {time.time() - t:.1f} с")
+            files = tender_docs.fetch_eis_documents(client, url, out / "files")
+            log.ok(f"скачано файлов: {len(files)} за {time.time() - t:.1f} с")
         except Exception as exc:
             log.fail(f"документы: {exc}")
             log(traceback.format_exc())

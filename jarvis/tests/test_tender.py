@@ -313,3 +313,19 @@ def test_title_highlight_is_glued():
       <div class="registry-entry__body-value">Поставка <span class="highlight">проектор</span>а и <b>экран</b>ов</div>
     </div>"""
     assert parse_results(html)[0].title == "Поставка проектора и экранов"
+
+
+def test_old_223_card_with_unescaped_ampersand_entity(tmp_path):
+    card = "https://zakupki.gov.ru/223/purchase/public/purchase/info/common-info.html?regNumber=32616576327"
+    tab = ("https://zakupki.gov.ru/epz/order/notice/notice223/documents.html?purchaseNoticeNumber=32616576327"
+           "&noticeGuid=38f2fc7f-c0f9-48d6-b181-e4386a620809")
+    # в HTML ЕИС амперсанд не экранирован: «&noticeGuid» — html.parser видит в нём «&not»
+    card_html = '<a href="/epz/order/notice/notice223/documents.html?purchaseNoticeNumber=32616576327&noticeGuid=38f2fc7f-c0f9-48d6-b181-e4386a620809">Документы</a>'
+    eis = FakeEIS({
+        card: card_html,
+        tab: '<a href="https://zakupki.gov.ru/223/purchase/public/download/download.html?id=777&amp;notice=1" title="ТЗ.docx">ТЗ</a>',
+    })
+    page, links, tried = tender_docs.locate_documents(eis, card)
+    assert page == tab
+    assert links == [("ТЗ.docx", "https://zakupki.gov.ru/223/purchase/public/download/download.html?id=777&notice=1")]
+    assert any("файлов: 1" in t for t in tried)
