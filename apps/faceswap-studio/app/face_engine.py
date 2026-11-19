@@ -115,14 +115,29 @@ def arcface_template(image_size: int) -> np.ndarray:
 
 
 def estimate_norm(kps: np.ndarray, image_size: int = 112) -> np.ndarray:
-    """2x3 similarity transform mapping the 5 landmarks onto the ArcFace template."""
-    import cv2
+    """2x3 similarity transform mapping the 5 landmarks onto the ArcFace template.
 
-    dst = arcface_template(image_size)
-    m, _ = cv2.estimateAffinePartial2D(np.asarray(kps, dtype=np.float32).reshape(5, 2), dst, method=cv2.LMEDS)
-    if m is None:
+    Least-squares Umeyama fit over all five points, as insightface does via
+    skimage's SimilarityTransform (a robust estimator could drop a landmark).
+    """
+    src = np.asarray(kps, dtype=np.float64).reshape(5, 2)
+    dst = arcface_template(image_size).astype(np.float64)
+    src_mean, dst_mean = src.mean(axis=0), dst.mean(axis=0)
+    src_c, dst_c = src - src_mean, dst - dst_mean
+    src_var = (src_c**2).sum() / len(src)
+    if src_var < 1e-12:
         raise ValueError("could not estimate face alignment")
-    return m
+    cov = dst_c.T @ src_c / len(src)
+    u, s, vt = np.linalg.svd(cov)
+    d = np.ones(2)
+    if np.linalg.det(u) * np.linalg.det(vt) < 0:
+        d[-1] = -1
+    rot = u @ np.diag(d) @ vt
+    scale = (s * d).sum() / src_var
+    m = np.zeros((2, 3))
+    m[:, :2] = scale * rot
+    m[:, 2] = dst_mean - scale * rot @ src_mean
+    return m.astype(np.float32)
 
 
 def norm_crop2(img: np.ndarray, kps: np.ndarray, image_size: int = 112) -> tuple[np.ndarray, np.ndarray]:
