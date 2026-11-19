@@ -82,6 +82,9 @@
         setBar('cpu', st.cpu);
         setBar('ram', st.ram);
         setBar('disk', st.disk);
+        if (document.body.dataset.tab === 'settings' && api().telegram_status) {
+          renderIntegrations({ telegram: await api().telegram_status(), email: {} });
+        }
       } catch (e) {
         /* телеметрия необязательна */
       }
@@ -695,10 +698,15 @@
     $('tg-status').textContent = !tg.enabled ? 'Не подключён.'
       : tg.paired ? 'Подключён' + (tg.bot ? ' (@' + tg.bot + ')' : '') + ', чат привязан. Бот отвечает только вам.'
         : 'Бот подключён' + (tg.bot ? ' (@' + tg.bot + ')' : '') + ', ждёт привязки чата.';
-    if (tg.code && !tg.paired) $('tg-code').textContent = 'Отправьте боту: /start ' + tg.code;
+    if (tg.code && !tg.paired) $('tg-code').textContent = 'Код привязки: ' + tg.code + '  (или отправьте боту /start ' + tg.code + ')';
     else $('tg-code').textContent = '';
+    $('tg-open').style.display = tg.enabled && !tg.paired ? '' : 'none';
+    $('tg-health').textContent = !tg.enabled ? ''
+      : tg.last_error ? 'Связь с Telegram: ошибка — ' + tg.last_error
+        : tg.last_ok ? 'Связь с Telegram: работает (последняя проверка ' + tg.last_ok + ')'
+          : tg.running ? 'Связь с Telegram: подключаюсь…' : 'Связь с Telegram: не запущена';
     const em = st.email || {};
-    $('em-status').textContent = em.configured ? 'Почта настроена.' : (em.has_password ? 'Пароль сохранён.' : 'Пароль не задан.');
+    if (st.email && Object.keys(st.email).length) $('em-status').textContent = em.configured ? 'Почта настроена.' : (em.has_password ? 'Пароль сохранён.' : 'Пароль не задан.');
   }
 
   $('tg-connect').addEventListener('click', async () => {
@@ -711,6 +719,7 @@
     }
     renderIntegrations(await api().get_state());
   });
+  $('tg-open').addEventListener('click', async () => toast((await api().telegram_open_bot()).text));
   $('tg-test').addEventListener('click', async () => toast((await api().telegram_test()).text));
   $('tg-disconnect').addEventListener('click', async () => {
     toast((await api().telegram_disconnect()).text);

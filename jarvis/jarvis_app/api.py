@@ -607,6 +607,17 @@ class JarvisApi:
         bot = f"@{info['bot']}" if info.get("bot") else "вашему боту"
         return {"ok": True, "code": info["code"], "text": f"Отправьте {bot} сообщение: /start {info['code']}"}
 
+    def telegram_open_bot(self) -> dict[str, Any]:
+        """Открывает бота в Telegram по ссылке с кодом привязки: «Старт» сам отправит код."""
+        import webbrowser
+
+        st = self._telegram.status()
+        if not st["bot"]:
+            return {"ok": False, "text": "Сначала вставьте токен и нажмите «Подключить»."}
+        link = st["link"] or f"https://t.me/{st['bot']}"
+        webbrowser.open(link)
+        return {"ok": True, "text": "Откроется Telegram — нажмите в чате с ботом «Старт» (или «Запустить»)."}
+
     def telegram_disconnect(self) -> dict[str, Any]:
         self._telegram.disconnect()
         return {"ok": True, "text": "Telegram отключён."}

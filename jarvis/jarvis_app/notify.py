@@ -8,6 +8,7 @@ Telegram: бот отвечает только одному чату — том�
 from __future__ import annotations
 
 import random
+import re
 import smtplib
 import ssl
 import threading
@@ -94,8 +95,22 @@ class TelegramBot:
         self._http = session or requests.Session()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
-        self.pair_code = ""
         self.bot_name = ""
+        self.last_ok = 0.0
+        self.last_error = ""
+
+    # Код привязки хранится в настройках до привязки, чтобы пережить перезапуск Джарвиса.
+    @property
+    def pair_code(self) -> str:
+        return str(self._config.get("telegram", {}).get("pair_code") or "")
+
+    @pair_code.setter
+    def pair_code(self, value: str) -> None:
+        self._config.update({"telegram": {"pair_code": value}})
+
+    @staticmethod
+    def _norm_code(code: str) -> str:
+        return re.sub(r"[^0-9A-Z]", "", (code or "").upper())
 
     # ---------- API ----------
     def _call(self, method: str, token: str | None = None, timeout: float = 20, **params) -> Any:
@@ -142,7 +157,8 @@ class TelegramBot:
             if not set_secret(TELEGRAM_KEY, token):
                 raise TelegramError("Не удалось сохранить токен в диспетчере учётных данных Windows.")
             self.bot_name = me.get("username", "")
-        self.pair_code = f"J-{random.SystemRandom().randint(1000, 9999)}"
+        if not self.pair_code or self.chat_id() is None:
+            self.pair_code = f"J-{random.SystemRandom().randint(1000, 9999)}"
         self._config.update({"telegram": {"enabled": True, "bot_name": self.bot_name or self._config.get("telegram", {}).get("bot_name", "")}})
         self.start()
         return {"bot": self.bot_name, "code": self.pair_code}
@@ -154,12 +170,17 @@ class TelegramBot:
 
     def status(self) -> dict[str, Any]:
         tg = self._config.get("telegram", {}) or {}
+        bot = tg.get("bot_name", "")
+        code = self.pair_code
         return {
             "enabled": bool(tg.get("enabled")) and bool(get_secret(TELEGRAM_KEY)),
             "paired": bool(tg.get("chat_id")),
-            "bot": tg.get("bot_name", ""),
-            "code": self.pair_code,
+            "bot": bot,
+            "code": code,
+            "link": f"https://t.me/{bot}?start={self._norm_code(code)}" if bot and code else "",
             "running": self._thread is not None and self._thread.is_alive(),
+            "last_ok": time.strftime("%H:%M:%S", time.localtime(self.last_ok)) if self.last_ok else "",
+            "last_error": self.last_error,
         }
 
     # ---------- цикл ----------
@@ -185,11 +206,15 @@ class TelegramBot:
                     params["offset"] = offset
                 updates = self._call("getUpdates", timeout=35, **params) or []
                 backoff = 5
+                self.last_ok = time.time()
+                self.last_error = ""
                 for update in updates:
                     offset = update["update_id"] + 1
                     self.handle_update(update)
             except TelegramError as exc:
-                self._on_event("telegram_status", {"text": str(exc), "error": True})
+                if str(exc) != self.last_error:
+                    self._on_event("telegram_status", {"text": f"Telegram: {exc}", "error": True})
+                self.last_error = str(exc)
                 stop.wait(backoff)
                 backoff = min(backoff * 2, 300)
             except Exception:
@@ -207,7 +232,7 @@ class TelegramBot:
             code = text[len("/start"):].strip().upper()
             if paired == chat_id:
                 self.send("Я на связи, сэр. Пишите команды или вопросы.", chat_id)
-            elif self.pair_code and code == self.pair_code:
+            elif self.pair_code and self._norm_code(code) == self._norm_code(self.pair_code):
                 self._config.update({"telegram": {"chat_id": chat_id}})
                 self.pair_code = ""
                 name = (message.get("from") or {}).get("first_name", "")
@@ -219,7 +244,10 @@ class TelegramBot:
                 )
                 self._on_event("telegram_status", {"text": f"Telegram привязан: {name}", "error": False, "paired": True})
             else:
-                self._call("sendMessage", chat_id=chat_id, text="Этот бот приватный. Отправьте /start и код привязки из окна Джарвиса.")
+                hint = "Этот бот приватный. Отправьте /start и код привязки из окна Джарвиса (Настройки → Telegram)."
+                if not code:
+                    hint += " Проще всего нажать в Джарвисе кнопку «Открыть бота и привязать»."
+                self._call("sendMessage", chat_id=chat_id, text=hint)
             return
         if paired != chat_id:
             return  # чужие сообщения игнорируем молча

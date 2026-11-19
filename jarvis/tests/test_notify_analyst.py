@@ -204,3 +204,18 @@ def test_failed_deep_report_is_kept_with_error(tmp_path, monkeypatch):
     report = analyst.deep_report({"number": "X", "url": "u", "title": "T", "score": 80, "reason": "r", "price": 1.0})
     assert report["error"] == "нет файлов"
     assert "Глубокий разбор не удался" in an.format_report(report)
+
+
+def test_pair_code_survives_restart_and_deep_link_format(tmp_path, secrets):
+    config = Config(tmp_path / "c.json")
+    bot = notify.TelegramBot(config, lambda t: "ok", lambda e, p: None, session=FakeTG())
+    bot.start = lambda: None
+    code = bot.connect("123:ABC")["code"]
+    st = bot.status()
+    assert st["link"] == f"https://t.me/test_bot?start={code.replace('-', '')}"
+    # перезапуск приложения: новый объект бота, тот же конфиг — код прежний
+    bot2 = notify.TelegramBot(Config(tmp_path / "c.json"), lambda t: "ok", lambda e, p: None, session=FakeTG())
+    assert bot2.pair_code == code
+    # «Старт» по ссылке присылает код без дефиса
+    bot2.handle_update(msg(42, "/start " + code.replace("-", "").lower()))
+    assert bot2.chat_id() == 42 and bot2.pair_code == ""
