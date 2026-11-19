@@ -100,3 +100,31 @@ def test_gigachat_413_resets_history_and_retries():
     assert gc.ask("новый вопрос") == "Готово."
     retry = sess.calls[-1]["json"]["messages"]
     assert [m["role"] for m in retry] == ["system", "user"] and retry[-1]["content"] == "новый вопрос"
+
+
+def test_gigachat_truncated_answer_is_retried_and_normalized():
+    sess = Sess([
+        Resp({"access_token": "T", "expires_at": 9999999999999}),
+        Resp({"choices": [{"message": {"content": '{"scores": [{"number": "1", "score": "8'}, "finish_reason": "length"}]}),
+        Resp({"choices": [{"message": {"content": '```json\n{"scores": [{"number": 1, "score": "85%",}]}\n```'}}]}),
+    ])
+    gc = GigaChat("GigaChat-2", "", session=sess, auth_key="K")
+    schema = {"type": "object", "properties": {"scores": {"type": "array", "items": {"type": "object", "properties": {
+        "number": {"type": "string"}, "score": {"type": "integer"}, "reason": {"type": "string"}}}}}}
+    assert gc.json("S", "P", schema) == {"scores": [{"number": "1", "score": 85, "reason": ""}]}
+    assert "оборвался" in sess.calls[-1]["json"]["messages"][-1]["content"]
+
+
+def test_unexpected_transport_error_rolls_back_history():
+    import requests
+
+    class Boom:
+        def post(self, *a, **k):
+            raise requests.exceptions.ChunkedEncodingError("cut")
+
+    chat = OpenAICompatChat("https://api.example/v1", "m", "", TB(), session=Boom(), api_key="k")
+    try:
+        chat.ask("привет")
+    except Exception as exc:
+        assert "Ошибка связи" in str(exc)
+    assert chat._messages == []

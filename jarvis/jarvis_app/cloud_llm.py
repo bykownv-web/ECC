@@ -156,6 +156,8 @@ class OpenAICompatChat(_ToolChatMixin):
             raise CloudError(f"Нет связи с {self._url}. Проверьте интернет или адрес API.") from exc
         except requests.Timeout as exc:
             raise CloudError("Модель отвечает слишком долго.") from exc
+        except requests.RequestException as exc:  # ChunkedEncodingError, InvalidURL и т.п.
+            raise CloudError(f"Ошибка связи с {self._url or 'сервисом'} ({exc.__class__.__name__}). Проверьте адрес API.") from exc
         if response.status_code != 200:
             raise _status_error(self.name, response)
         try:
@@ -188,7 +190,7 @@ class OpenAICompatChat(_ToolChatMixin):
                         self._messages.append({"role": "tool", "tool_call_id": call.get("id", ""), "content": result})
                 del self._messages[start:]
                 return "Задача оказалась слишком длинной, я остановился. Уточните запрос."
-            except CloudError:
+            except Exception:  # любая ошибка: откатываем историю, чтобы не осталось висящего запроса
                 del self._messages[start:]
                 raise
 
@@ -361,7 +363,7 @@ class GigaChat(_ToolChatMixin):
                     self._messages.append({"role": "function", "name": name, "content": json.dumps({"result": result}, ensure_ascii=False)})
                 del self._messages[start:]
                 return "Задача оказалась слишком длинной, я остановился. Уточните запрос."
-            except CloudError:
+            except Exception:  # любая ошибка: откатываем историю, чтобы не осталось висящего запроса
                 del self._messages[start:]
                 raise
 

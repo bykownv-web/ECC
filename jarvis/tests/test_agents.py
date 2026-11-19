@@ -45,3 +45,27 @@ def test_unknown_agent_and_level_are_safe():
     bus.log("nobody", "x", level="weird")
     bus.start("nobody", "x")
     assert bus.snapshot()["log"][-1]["level"] == "info"
+
+
+def test_watch_maps_pipeline_events_to_agents():
+    from jarvis_app.agents import AgentWatch
+
+    bus = AgentBus()
+    w = AgentWatch(bus)
+    w.observe("procurement_status", {"text": "Ищу «проектор», страница 1…", "busy": True})
+    w.observe("procurement_results", {"items": [1, 2], "errors": [], "notes": ["Скрыто не по теме: 5"]})
+    w.observe("tender_state", {"state": {"purchase": {"number": "32616576327"},
+                                         "steps": {"files": {"status": "done", "note": "7 файл(ов)"},
+                                                   "analysis": {"status": "running", "note": "читаю ТЗ…"}}}})
+    w.observe("tender_state", {"state": {"purchase": {"number": "32616576327"},
+                                         "steps": {"analysis": {"status": "error", "note": "JSON"}}}})
+    w.observe("analyst_status", {"text": "Оцениваю закупки: 15 из 30…", "busy": True})
+    w.observe("telegram_status", {"text": "Telegram привязан", "paired": True})
+    agents = {a["id"]: a for a in bus.snapshot()["agents"]}
+    assert agents["search"]["status"] == "done" and "2" in agents["search"]["last_result"]
+    assert agents["docs"]["status"] == "done"
+    assert agents["tz"]["status"] == "error"
+    assert agents["scout"]["status"] == "working" and agents["scout"]["progress"] == 0.5
+    texts = " | ".join(e["text"] for e in bus.snapshot()["log"])
+    assert "Скрыто не по теме" in texts and "Telegram привязан" in texts and "№ 32616576327" in texts
+    w.observe("unknown_event", {"x": 1})  # неизвестные события не ломают журнал

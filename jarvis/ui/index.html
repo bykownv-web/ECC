@@ -104,7 +104,8 @@
         <button class="tab" data-tab="proc" role="tab"><i>02</i>Закупки</button>
         <button class="tab" data-tab="tender" role="tab"><i>03</i>Заявка</button>
         <button class="tab" data-tab="analyst" role="tab"><i>04</i>Аналитика</button>
-        <button class="tab" data-tab="settings" role="tab"><i>05</i>Настройки</button>
+        <button class="tab" data-tab="agents" role="tab"><i>05</i>Агенты</button>
+        <button class="tab" data-tab="settings" role="tab"><i>06</i>Настройки</button>
       </nav>
 
       <!-- Диалог -->
@@ -297,6 +298,35 @@
               <ol id="an-scores" class="list an-scores"></ol>
             </div>
           </aside>
+        </div>
+      </div>
+
+      <!-- Агенты -->
+      <div class="tab-body" id="tab-agents">
+        <header class="agents-head">
+          <div>
+            <h2 class="agents-title">Агенты J.A.R.V.I.S.</h2>
+            <div id="agents-summary" class="hint">Все агенты ждут задач</div>
+          </div>
+          <div class="inline">
+            <select id="agents-filter" title="Показать журнал одного агента">
+              <option value="all">Журнал: все агенты</option>
+              <option value="search">🔎 Поисковик ЕИС</option>
+              <option value="docs">📄 Документовед</option>
+              <option value="tz">🧠 Аналитик ТЗ</option>
+              <option value="match">🧩 Подборщик</option>
+              <option value="estimate">💰 Сметчик</option>
+              <option value="scout">📊 Аналитик закупок</option>
+              <option value="monitor">👁 Монитор</option>
+              <option value="comms">✉️ Связной</option>
+            </select>
+            <button class="btn btn-ghost" id="agents-clear-filter" type="button">Все</button>
+          </div>
+        </header>
+        <div id="agents-grid" class="agents-grid"></div>
+        <div class="agents-console">
+          <div class="agents-console-head"><span>◆ Журнал работы</span><span class="hint">новые записи — внизу</span></div>
+          <div id="agents-log" class="agents-log" aria-live="polite"></div>
         </div>
       </div>
 
@@ -529,5 +559,6 @@
   <div id="toast" class="toast" role="status"></div>
   <script src="neural.js"></script>
   <script src="app.js"></script>
+  <script src="agents.js"></script>
 </body>
 </html>

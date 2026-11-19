@@ -13,6 +13,8 @@ from typing import Any
 from urllib.parse import urlparse
 
 from . import __version__
+from .agents import BUS, AgentWatch
+from .agents import set_emitter as set_agents_emitter
 from .analyst import Analyst, format_report
 from .brain import Brain
 from .config import (
@@ -190,6 +192,8 @@ class JarvisApi:
         # Сначала все поля, потом фоновые потоки: Telegram и мониторинг сразу обращаются к ним.
         self._config = config
         self._window = None
+        self._agent_watch = AgentWatch(BUS)
+        set_agents_emitter(self._emit)
         self._busy = threading.Event()
         self._monitor_stop: threading.Event | None = None
         self._monitor_lock = threading.Lock()
@@ -232,6 +236,11 @@ class JarvisApi:
         self._window = window
 
     def _emit(self, event: str, payload: dict[str, Any]) -> None:
+        if event != "agents":
+            try:
+                self._agent_watch.observe(event, payload)
+            except Exception:  # журнал агентов не должен мешать основной работе
+                pass
         if self._window is None:
             return
         data = json.dumps({"event": event, "payload": payload}, ensure_ascii=True, default=str)
@@ -261,6 +270,10 @@ class JarvisApi:
             self._telegram.send(f"⏰ Напоминание: {text}")
 
     # ---------- состояние и настройки ----------
+    def agents_state(self) -> dict[str, Any]:
+        """Карточки агентов и журнал для вкладки «Агенты»."""
+        return BUS.snapshot()
+
     def get_state(self) -> dict[str, Any]:
         def safe(fn, default):
             try:
@@ -641,7 +654,7 @@ class JarvisApi:
 
     def tender_pick_files(self) -> None:
         paths = self._pick_files((
-            "Документы (*.docx;*.pdf;*.xlsx;*.rtf;*.txt;*.zip)",
+            "Документы (*.docx;*.doc;*.pdf;*.xlsx;*.xls;*.rtf;*.txt;*.zip)",
             "Все файлы (*.*)",
         ))
         if paths:
@@ -696,9 +709,12 @@ class JarvisApi:
         def loop() -> None:
             first = self._toolbox.seen.is_empty()
             while not stop.is_set():
+                BUS.start("monitor", "Плановая проверка ЕИС")
                 try:
                     found, _ = self._toolbox.run_procurement_search()
                     new = self._toolbox.seen.filter_new(found)
+                    BUS.finish("monitor", f"актуальных {len(found)}, новых {len(new) if not first else 0}"
+                               f"; следующая проверка через {interval} мин")
                     if new and not first:
                         titles = "; ".join(p.title[:80] for p in new[:3])
                         text = f"Появилось новых закупок: {len(new)}. {titles}"
@@ -717,9 +733,11 @@ class JarvisApi:
                                 self._emit("analyst_status", {"text": str(exc) or exc.__class__.__name__,
                                                               "busy": False, "error": True})
                 except ProcurementError as exc:
+                    BUS.fail("monitor", str(exc))
                     self._emit("error", {"text": f"Мониторинг: {exc}"})
                 except Exception as exc:  # не молчим: иначе мониторинг «работает», но ничего не находит
                     _log_error(exc)
+                    BUS.fail("monitor", _error_text(exc))
                     self._emit("error", {"text": f"Мониторинг: {_error_text(exc)}"})
                 stop.wait(interval * 60)
 
@@ -850,7 +868,9 @@ class JarvisApi:
 
     def _analyst_already_running(self, exc: BaseException) -> bool:
         """«Аналитика уже выполняется» — не ошибка: показываем тостом и не трогаем кнопку (идёт прогон)."""
-        if isinstance(exc, ValueError) and "уже выполняется" in str(exc):
+        from .analyst import AnalystBusy
+
+        if isinstance(exc, AnalystBusy) or (isinstance(exc, ValueError) and "уже выполняется" in str(exc)):
             self._emit("toast", {"text": str(exc)})
             return True
         return False

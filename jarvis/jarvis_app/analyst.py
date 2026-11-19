@@ -233,6 +233,10 @@ def format_report(report: dict[str, Any]) -> str:
     return "\n".join(line for line in lines if line)
 
 
+class AnalystBusy(ValueError):
+    """Аналитика уже идёт в другом потоке (ручной запуск во время мониторинга)."""
+
+
 def _score(value: Any) -> int:
     """Балл 0–100 из ответа ИИ: 85, "85", "85%", "85/100", 85.5 — всё приводится к целому."""
     num = to_number(value)
@@ -373,7 +377,7 @@ class Analyst:
 
     def run(self, purchases: list[Purchase], notify: bool = True) -> list[dict[str, Any]]:
         if not self._lock.acquire(blocking=False):
-            raise ValueError("Аналитика уже выполняется.")
+            raise AnalystBusy("Аналитика уже выполняется.")
         try:
             s = self.settings()
             scored = self.score(purchases)

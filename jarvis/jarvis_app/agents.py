@@ -193,3 +193,124 @@ BUS = AgentBus()
 
 def set_emitter(emit: Callable[[str, dict[str, Any]], None]) -> None:
     BUS._emit = emit  # noqa: SLF001 — подключение окна после создания
+
+
+class AgentWatch:
+    """Переводит события, которые Джарвис отправляет в окно, в работу агентов и записи журнала.
+
+    Так модули поиска, заявки и аналитики не нужно менять: их события уже описывают, что происходит.
+    """
+
+    STEP_AGENT = {"files": "docs", "analysis": "tz", "match": "match", "estimate": "estimate", "docs": "docs"}
+    STEP_TITLE = {"files": "Документы закупки", "analysis": "Разбор ТЗ", "match": "Подбор оборудования",
+                  "estimate": "Смета и маржа", "docs": "Документы заявки"}
+
+    def __init__(self, bus: AgentBus) -> None:
+        self.bus = bus
+        self._steps: dict[str, str] = {}
+        self._purchase = ""
+
+    def observe(self, event: str, p: dict[str, Any]) -> None:
+        p = p if isinstance(p, dict) else {}
+        handler = getattr(self, "_on_" + event, None)
+        if handler is not None:
+            handler(p)
+
+    # ---------- поиск ----------
+    def _on_procurement_status(self, p: dict[str, Any]) -> None:
+        text = str(p.get("text") or "")
+        if p.get("busy") and text:
+            if self.bus.snapshot()["agents"][0]["status"] != "working":
+                self.bus.start("search", text)
+            else:
+                self.bus.progress("search", text)
+
+    def _on_procurement_results(self, p: dict[str, Any]) -> None:
+        items = p.get("items") or []
+        errors = p.get("errors") or []
+        notes = p.get("notes") or []
+        for note in notes if isinstance(notes, list) else []:
+            self.bus.log("search", str(note), "warn")
+        if errors and isinstance(errors, list) and not items:
+            self.bus.fail("search", "; ".join(map(str, errors))[:300])
+        else:
+            for err in errors if isinstance(errors, list) else []:
+                self.bus.log("search", str(err), "warn")
+            self.bus.finish("search", f"найдено актуальных закупок: {len(items)}")
+
+    # ---------- заявка ----------
+    def _on_tender_state(self, p: dict[str, Any]) -> None:
+        st = p.get("state") or {}
+        purchase = (st.get("purchase") or {}).get("number") or ""
+        if purchase and purchase != self._purchase:
+            self._purchase = purchase
+            self._steps = {}
+            self.bus.log("docs", f"Новая закупка в работе: № {purchase}")
+        for key, info in (st.get("steps") or {}).items():
+            if not isinstance(info, dict) or key not in self.STEP_AGENT:
+                continue
+            status, note = info.get("status", ""), str(info.get("note") or "")
+            if self._steps.get(key) == status + note:
+                continue
+            self._steps[key] = status + note
+            agent = self.STEP_AGENT[key]
+            title = f"{self.STEP_TITLE[key]} № {purchase}" if purchase else self.STEP_TITLE[key]
+            if status == "running":
+                self.bus.start(agent, title)
+                if note:
+                    self.bus.progress(agent, note)
+            elif status == "done":
+                self.bus.finish(agent, note or title)
+            elif status == "skipped":
+                self.bus.log(agent, f"Пропущено: {note}", "warn")
+                self.bus.idle(agent)
+            elif status == "error":
+                self.bus.fail(agent, note or "ошибка")
+
+    def _on_tender_status(self, p: dict[str, Any]) -> None:
+        text = str(p.get("text") or "")
+        if not text:
+            return
+        low = text.lower()
+        agent = ("tz" if "тз" in low or "разбира" in low else "match" if "подбира" in low
+                 else "estimate" if "стоимост" in low or "маржу" in low else "docs")
+        if p.get("error"):
+            self.bus.log(agent, text, "error")
+        elif p.get("busy"):
+            self.bus.progress(agent, text)
+
+    # ---------- аналитика и мониторинг ----------
+    def _on_analyst_status(self, p: dict[str, Any]) -> None:
+        text = str(p.get("text") or "")
+        if not text:
+            return
+        if p.get("error"):
+            self.bus.fail("scout", text)
+            return
+        if p.get("busy"):
+            import re as _re
+
+            m = _re.search(r"(\d+)\s+из\s+(\d+)", text)
+            frac = int(m.group(1)) / max(1, int(m.group(2))) if m else None
+            low = text.lower()
+            agent = "tz" if "тз" in low else "estimate" if "стоимост" in low else "docs" if "скачива" in low else "scout"
+            self.bus.progress(agent, text, frac)
+        elif text.startswith("Готово"):
+            self.bus.finish("scout", text)
+
+    def _on_monitor_new(self, p: dict[str, Any]) -> None:
+        self.bus.log("monitor", str(p.get("text") or "Новые закупки"), "ok")
+
+    # ---------- связь ----------
+    def _on_telegram_status(self, p: dict[str, Any]) -> None:
+        text = str(p.get("text") or "")
+        if text:
+            self.bus.log("comms", text, "error" if p.get("error") else "ok")
+
+    def _on_user(self, p: dict[str, Any]) -> None:
+        text = str(p.get("text") or "")
+        if text.startswith("[Telegram]"):
+            self.bus.log("comms", "Входящее: " + text[10:].strip()[:200])
+
+    def _on_reminder(self, p: dict[str, Any]) -> None:
+        self.bus.log("comms", "Напоминание: " + str(p.get("text") or ""), "ok")

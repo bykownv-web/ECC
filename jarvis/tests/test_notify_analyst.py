@@ -268,3 +268,21 @@ def test_old_backlog_messages_are_ignored(tmp_path, secrets):
     old["message"]["date"] = int(_t.time()) - 3600
     bot.handle_update(old)
     assert bot.chat_id() is None and http.calls == []
+
+
+def test_compute_totals_tolerates_strings_and_none():
+    est = {"equipment": [{"quantity": "2 шт", "unit_cost_min": "100 000,00", "unit_cost_max": None}, "мусор"],
+           "installation_required": "да", "installation_cost_min": "15 тыс.", "installation_cost_max": None}
+    t = an.compute_totals(est, "218 667,00")
+    assert (t["equipment_min"], t["equipment_max"]) == (200000.0, 200000.0)
+    assert (t["installation_min"], t["installation_max"], t["nmck"]) == (15000.0, 15000.0, 218667.0)
+    assert an.compute_totals({"installation_required": "false", "installation_cost_min": 5}, None)["installation_min"] == 0
+
+
+def test_analyst_busy_is_a_value_error(tmp_path):
+    config = Config(tmp_path / "c.json")
+    analyst = an.Analyst(config, lambda: None, lambda e, p: None, store=an.AnalystStore(tmp_path / "a.json"), llm_factory=lambda: None)
+    analyst._lock.acquire()
+    with pytest.raises(an.AnalystBusy, match="уже выполняется"):
+        analyst.run([])
+    assert issubclass(an.AnalystBusy, ValueError)

@@ -383,3 +383,58 @@ def test_gigachat_json_retry_after_broken_answer():
     gc = GigaChat("GigaChat-2", "", session=s, auth_key="K")
     assert gc.json("SYS", "P", {"type": "object", "properties": {"ok": {"type": "boolean"}}}) == {"ok": True}
     assert s.bodies[1]["max_tokens"] == 8000 and "исправленный JSON" in s.bodies[2]["messages"][-1]["content"]
+
+
+def test_normalize_coerces_gigachat_values():
+    from jarvis_app.analyst import ESTIMATE_SCHEMA, SCORE_SCHEMA
+    from jarvis_app.llm import normalize, to_number
+
+    assert [to_number(v) for v in ("1 234,5", "85%", "≈ 450 тыс. руб.", "100 000–150 000", "1,2 млн", "нет")] == \
+        [1234.5, 85.0, 450000.0, 100000.0, 1200000.0, None]
+    est = normalize(ESTIMATE_SCHEMA, {"equipment": [{"quantity": "2 шт", "unit_cost_min": "1 000,50"}, "мусор"],
+                                      "installation_required": "не требуется", "risks": "сроки", "recommendation": "Не участвовать!"})
+    assert est["equipment"] == [{"name": "", "quantity": 2, "unit": "", "key_specs": "", "unit_cost_min": 1000.5,
+                                 "unit_cost_max": 0, "price_basis": ""}]
+    assert est["installation_required"] is False and est["risks"] == ["сроки"] and est["recommendation"] == "не участвовать"
+    assert est["installation_cost_min"] == 0 and est["reasoning"] == ""  # недостающие ключи — по умолчанию
+    assert normalize(SCORE_SCHEMA, [{"number": 123, "score": "85%"}]) == {"scores": [{"number": "123", "score": 85, "reason": ""}]}
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ('Оценка {по схеме}: {"a": 1} — готово {:)}', {"a": 1}),
+    ('{"positions": [{"name": "A"}, {"name": "B", "quan', {"positions": [{"name": "A"}, {"name": "B"}]}),
+    ('{"s": "Поставка «Проектора»", "x": [1,],}', {"s": "Поставка «Проектора»", "x": [1]}),
+    ("{'a': 'b'}", {"a": "b"}),
+    ('{"s": "строка\nс переводом"}', {"s": "строка\nс переводом"}),
+])
+def test_loads_more_gigachat_shapes(raw, expected):
+    assert _loads(raw) == expected
+
+
+def test_word97_and_rtf_and_sniffing(tmp_path):
+    import base64
+    import zlib
+
+    from tests.test_e2e_eis import NOTICE_RTF, WORD97_DOC_B64
+
+    data = zlib.decompress(base64.b64decode(WORD97_DOC_B64))
+    text = tender_docs.word97_text(data)
+    assert "декларацию о стране происхождения товара («Россия» или иная страна)." in text
+    assert "Выписка из реестра российской промышленной продукции | да" in text
+    assert tender_docs.sniff_suffix(data) == ".doc"
+    # «.doc», который на деле RTF, и имя без расширения с точками в дате
+    assert tender_docs.fix_extension("Требования.doc", NOTICE_RTF) == "Требования.rtf"
+    assert tender_docs.fix_extension("Договор от 01.02.2026", b"%PDF-1.4") == "Договор от 01.02.2026.pdf"
+    long = tender_docs.safe_name("Приложение " * 30 + ".docx")
+    assert long.endswith(".docx") and len(long) <= 150  # обрезка не съедает расширение
+
+
+def test_process_files_never_crashes_on_bad_doc(tmp_path, monkeypatch):
+    def boom(path):
+        raise RuntimeError("Word завис")
+
+    monkeypatch.setattr(tender_docs, "convert_with_office", boom)
+    (tmp_path / "bad.doc").write_bytes(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\xff" * 2000)
+    (tmp_path / "ok.txt").write_text("Проектор 2 шт", encoding="utf-8")
+    files, text = tender_docs.process_files([tmp_path / "bad.doc", tmp_path / "ok.txt"], tmp_path)
+    assert files[0].kind == "error" and "docx" in files[0].status and "Проектор 2 шт" in text

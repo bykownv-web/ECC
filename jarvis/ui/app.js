@@ -519,9 +519,10 @@
     arr(st.files).forEach((raw2) => {
       const f = obj(raw2);
       const status = str(f.status);
-      const ok = /извлечён|архив/.test(status);
+      const kind = str(f.kind);
+      const ok = kind ? (kind === 'ok' || kind === 'skipped') : /извлечён|архив/.test(status);
       const chars = toNum(f.chars) ? ' · ' + intText(f.chars) + ' симв.' : '';
-      files.appendChild(el('li', { cls: ok ? 'ok' : 'bad' }, [
+      files.appendChild(el('li', { cls: kind === 'warning' ? 'warn' : ok ? 'ok' : 'bad' }, [
         el('span', { cls: 'file-name', text: str(f.name) || '—' }), el('span', { cls: 'file-status', text: (status || '—') + chars }),
       ]));
     });

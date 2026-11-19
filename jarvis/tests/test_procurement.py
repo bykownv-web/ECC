@@ -179,3 +179,39 @@ def test_search_tags_strict_and_minus_words():
     assert items == []
     assert any("не по теме: 1" in e for e in errors)  # «Звуковое оборудование для театра» — не про проекторы
     assert any("минус-словам: 1" in e and "медицин" in e for e in errors)
+
+
+def test_content_disposition_names():
+    from urllib.parse import quote
+
+    name = "Приложение № 3 НМЦК.xlsx"
+    f = pr.filename_from_disposition
+    assert f("attachment; filename*=UTF-8''" + quote(name)) == name
+    assert f("attachment; filename*=\"UTF-8''" + quote(name) + "\"") == name
+    assert f("attachment; filename*=windows-1251''" + quote(name, encoding="cp1251")) == name
+    assert f('attachment; filename="' + name.encode("cp1251").decode("latin-1") + '"') == name
+    assert f('attachment; filename="' + name.encode("utf-8").decode("latin-1") + '"') == name
+    assert f('attachment; filename="x.xlsx"; filename*=UTF-8\'ru\'' + quote(name)) == name
+
+
+def test_html_instead_of_file_is_reported():
+    import requests
+
+    class S:
+        headers = {}
+
+        def get(self, url, timeout=None, verify=None):
+            r = requests.Response()
+            r.status_code, r._content = 200, "<html><title>Доступ ограничен</title></html>".encode()
+            r.headers = requests.structures.CaseInsensitiveDict({"Content-Type": "text/html"})
+            return r
+
+    client = pr.ProcurementClient(session=S())
+    pr.DELAY_BETWEEN_REQUESTS, old = 0, pr.DELAY_BETWEEN_REQUESTS
+    try:
+        with pytest.raises(pr.ProcurementError, match="заглушку"):
+            client.get_file("https://zakupki.gov.ru/44fz/filestore/x")
+        with pytest.raises(pr.ProcurementError, match="Доступ ограничен"):
+            client.search(pr.SearchParams(query="проектор"))
+    finally:
+        pr.DELAY_BETWEEN_REQUESTS = old

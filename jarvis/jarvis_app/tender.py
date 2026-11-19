@@ -295,8 +295,12 @@ class TenderWorkspace:
 
     @staticmethod
     def _error_text(exc: Exception) -> str:
+        from .llm import LLMError
+
         text = " ".join(str(exc).split())
-        return text or f"неожиданная ошибка ({exc.__class__.__name__})"
+        if isinstance(exc, (TenderError, ProcurementError, LLMError, ValueError, OSError)) and text:
+            return text
+        return f"неожиданная ошибка ({exc.__class__.__name__}: {text or 'без описания'}) — пришлите diagnose.py разработчику."
 
     def _files_note(self, state: dict[str, Any]) -> str:
         files = state.get("files") or []
