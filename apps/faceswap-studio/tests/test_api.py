@@ -165,3 +165,25 @@ def test_face_swap_endpoints_removed(client, path):
 def test_health_has_no_face_swap_fields(client):
     body = client.get("/api/health").json()
     assert not any("swap" in key for key in body)
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "sexy woman in a red evening dress",
+        "lingerie fashion editorial, studio light",
+        "сексуальная девушка в вечернем платье",
+        "glamorous woman, hourglass figure, swimsuit on the beach",
+    ],
+)
+def test_prompt_filter_allows_suggestive_non_explicit(prompt):
+    check_prompt(prompt)
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    ["sex scene", "sexual act on a bed", "секс на пляже", "сцена с сексом", "topless woman", "nude model"],
+)
+def test_prompt_filter_still_blocks_explicit(prompt):
+    with pytest.raises(ContentBlocked):
+        check_prompt(prompt)
