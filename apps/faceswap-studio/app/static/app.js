@@ -7,7 +7,12 @@
   const els = {
     status: $("#status"),
     empty: $("#result-empty"),
-    spinner: $("#spinner"),
+    progress: $("#progress"),
+    track: $("#progress-track"),
+    bar: $("#progress-bar"),
+    stage: $("#progress-stage"),
+    percent: $("#progress-percent"),
+    cancel: $("#progress-cancel"),
     error: $("#error"),
     result: $("#result"),
     img: $("#result-img"),
@@ -36,18 +41,25 @@
     });
   });
 
-  // Health
-  fetch("/api/health")
-    .then((r) => r.json())
-    .then((h) => {
-      const swap = h.swap_model_present ? "" : " · модель подмены лица не найдена";
-      els.status.textContent = `${h.backend} · ${h.device}${swap}`;
-      els.status.className = "status " + (h.swap_model_present ? "ok" : "bad");
-    })
-    .catch(() => {
-      els.status.textContent = "Сервер недоступен";
-      els.status.className = "status bad";
-    });
+  // Health (also re-read after each job: architecture of the loaded model, low-VRAM mode)
+  function refreshHealth() {
+    return fetch("/api/health", { cache: "no-store" })
+      .then((r) => r.json())
+      .then((h) => {
+        const parts = [`${h.backend} · ${h.device}`];
+        if (h.lowvram_active) parts.push("режим экономии видеопамяти");
+        if (h.architecture === "sd15") parts.push("модель SD 1.5: лучше 512×512");
+        else if (h.architecture === "sdxl") parts.push("модель SDXL: 1024×1024");
+        if (!h.swap_model_present) parts.push("модель подмены лица не найдена");
+        els.status.textContent = parts.join(" · ");
+        els.status.className = "status " + (h.swap_model_present ? "ok" : "bad");
+      })
+      .catch(() => {
+        els.status.textContent = "Сервер недоступен";
+        els.status.className = "status bad";
+      });
+  }
+  refreshHealth();
 
   // Models / LoRA
   let loraNames = [];
@@ -86,17 +98,6 @@
     }));
   }
 
-  function setBusy(form, busy) {
-    const btn = $('button[type="submit"]', form);
-    btn.disabled = busy;
-    els.spinner.hidden = !busy;
-    if (busy) {
-      els.empty.hidden = true;
-      els.error.hidden = true;
-      els.result.hidden = true;
-    }
-  }
-
   function showError(message) {
     els.error.textContent = message;
     els.error.hidden = false;
@@ -127,38 +128,98 @@
     return `Ошибка ${res.status}`;
   }
 
+  // Background jobs: submit -> poll GET /api/jobs/{id} -> show the result
+  const POLL_MS = 700;
+  let activeJob = null; // { id, cancelled, timer }
+
+  function setBusy(form, busy) {
+    $$('form button[type="submit"]').forEach((btn) => { btn.disabled = busy; });
+    els.progress.hidden = !busy;
+    if (busy) {
+      els.empty.hidden = true;
+      els.error.hidden = true;
+      els.result.hidden = true;
+      els.cancel.disabled = true;
+      renderProgress({ stage: "Отправка…", progress: 0 });
+    }
+  }
+
+  function renderProgress(job) {
+    const pct = Math.round((job.progress || 0) * 100);
+    let stage = job.stage || "";
+    if (job.status === "queued" && job.queue_position) stage = `В очереди: позиция ${job.queue_position}`;
+    if (job.cancel_requested && job.status === "running") stage = "Отмена…";
+    els.stage.textContent = stage;
+    els.percent.textContent = `${pct}%`;
+    els.bar.style.width = `${pct}%`;
+    els.track.setAttribute("aria-valuenow", String(pct));
+  }
+
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  async function waitForJob(jobId) {
+    for (;;) {
+      const res = await fetch(`/api/jobs/${jobId}`, { cache: "no-store" });
+      if (!res.ok) throw new Error(await errorText(res));
+      const job = await res.json();
+      renderProgress(job);
+      if (job.status === "done") return job.result;
+      if (job.status === "error") {
+        const err = new Error(job.error ? job.error.detail : "Ошибка");
+        err.cancelled = job.error && job.error.code === 499;
+        throw err;
+      }
+      await sleep(POLL_MS);
+    }
+  }
+
+  els.cancel.addEventListener("click", async () => {
+    if (!activeJob) return;
+    els.cancel.disabled = true;
+    try {
+      const res = await fetch(`/api/jobs/${activeJob}/cancel`, { method: "POST" });
+      if (res.ok) renderProgress(await res.json());
+    } catch (_) { /* polling reports the final state */ }
+  });
+
+  function buildRequest(form, asJson) {
+    const fd = new FormData(form);
+    if (asJson) {
+      const body = {};
+      for (const [k, v] of fd.entries()) {
+        if (v === "" || k.startsWith("lora_")) continue;
+        body[k] = ["width", "height", "steps", "seed"].includes(k) ? parseInt(v, 10)
+          : k === "guidance" ? parseFloat(v) : v;
+      }
+      body.loras = collectLoras(form);
+      return { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
+    }
+    for (const [k, v] of Array.from(fd.entries())) if (v === "" || k.startsWith("lora_")) fd.delete(k);
+    if ($(".model-block", form)) fd.set("loras", JSON.stringify(collectLoras(form)));
+    $$('input[type="checkbox"]', form).forEach((cb) => fd.set(cb.name, cb.checked ? "true" : "false"));
+    return { method: "POST", body: fd };
+  }
+
   async function submit(form, url, asJson) {
+    if (activeJob) return;
     setBusy(form, true);
     try {
-      let init;
-      if (asJson) {
-        const fd = new FormData(form);
-        const body = {};
-        for (const [k, v] of fd.entries()) {
-          if (v === "" || k.startsWith("lora_")) continue;
-          body[k] = ["width", "height", "steps", "seed"].includes(k) ? parseInt(v, 10)
-            : k === "guidance" ? parseFloat(v) : v;
-        }
-        body.loras = collectLoras(form);
-        init = { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
-      } else {
-        const fd = new FormData(form);
-        for (const [k, v] of Array.from(fd.entries())) if (v === "" || k.startsWith("lora_")) fd.delete(k);
-        if ($(".model-block", form)) fd.set("loras", JSON.stringify(collectLoras(form)));
-        $$('input[type="checkbox"]', form).forEach((cb) => fd.set(cb.name, cb.checked ? "true" : "false"));
-        init = { method: "POST", body: fd };
-      }
-      const res = await fetch(url, init);
+      const res = await fetch(url, buildRequest(form, asJson));
       if (!res.ok) throw new Error(await errorText(res));
-      showResult(await res.json());
+      const { job_id: jobId } = await res.json();
+      activeJob = jobId;
+      els.cancel.disabled = false;
+      showResult(await waitForJob(jobId));
+      refreshHealth();
     } catch (err) {
-      showError(err.message || String(err));
+      showError(err.cancelled ? "Задача отменена." : (err.message || String(err)));
     } finally {
+      activeJob = null;
       setBusy(form, false);
     }
   }
 
-  $("#form-generate").addEventListener("submit", (e) => { e.preventDefault(); submit(e.target, "/api/generate", true); });
-  $("#form-swap").addEventListener("submit", (e) => { e.preventDefault(); submit(e.target, "/api/swap", false); });
-  $("#form-combo").addEventListener("submit", (e) => { e.preventDefault(); submit(e.target, "/api/generate-swap", false); });
+  $("#form-generate").addEventListener("submit", (e) => { e.preventDefault(); submit(e.target, "/api/jobs/generate", true); });
+  $("#form-swap").addEventListener("submit", (e) => { e.preventDefault(); submit(e.target, "/api/jobs/swap", false); });
+  $("#form-combo").addEventListener("submit", (e) => { e.preventDefault(); submit(e.target, "/api/jobs/generate-swap", false); });
 })();
