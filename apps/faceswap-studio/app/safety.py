@@ -12,18 +12,19 @@ log = logging.getLogger("image_studio.safety")
 
 WATERMARK_TEXT = "AI-generated"
 
-# Sexual content and anything involving minors is refused outright.
-# This list is a coarse first line of defence, not a substitute for the image classifier.
+# Explicit sexual content and anything involving minors is refused outright.
+# Suggestive but non-explicit wording (sexy, lingerie, сексуальная) is allowed: the image
+# classifier still rejects nudity. This list is a coarse first line of defence only.
 _BASE_BLOCKED = (
     "nude",
     "naked",
     "nsfw",
     "porn",
     "sex",
+    "sexual",
     "erotic",
     "topless",
     "undress",
-    "lingerie",
     "hentai",
     "fetish",
     "explicit",
@@ -34,6 +35,10 @@ _BASE_BLOCKED = (
     "обнаж",
     "порно",
     "секс",
+    "секса",
+    "сексе",
+    "сексом",
+    "сексу",
     "эрот",
     "раздет",
     "интим",
@@ -58,12 +63,21 @@ class ContentBlocked(Exception):
     """Raised when a request or a result violates the content policy."""
 
 
+# Matched as whole words only, so that "sexy" / "сексуальная" are not caught by them
+_WHOLE_WORD = frozenset({"sex", "sexual", "секс", "секса", "сексе", "сексом", "сексу"})
+
+
 def check_prompt(prompt: str, extra_terms: Iterable[str] = ()) -> None:
     text = prompt.lower()
     for term in (*_BASE_BLOCKED, *extra_terms):
-        # Latin terms match on word start to avoid false hits ("sussex", "kidney" stay ok-ish);
-        # Cyrillic stems match as substrings.
-        pattern = rf"\b{re.escape(term)}" if term.isascii() else re.escape(term)
+        # Whole-word terms match exactly; other Latin terms match on word start to avoid
+        # false hits ("sussex", "kidney" stay ok-ish); Cyrillic stems match as substrings.
+        if term in _WHOLE_WORD:
+            pattern = rf"(?<!\w){re.escape(term)}(?!\w)"
+        elif term.isascii():
+            pattern = rf"\b{re.escape(term)}"
+        else:
+            pattern = re.escape(term)
         if re.search(pattern, text):
             raise ContentBlocked("Запрос нарушает правила контента и отклонён.")
 
@@ -94,9 +108,7 @@ class NsfwClassifier:
             return
         results = self._load()(image.convert("RGB"))
         for item in results:
-            if item["label"].lower() in {"nsfw", "porn", "sexy", "hentai"} and (
-                item["score"] >= self.threshold
-            ):
+            if item["label"].lower() in {"nsfw", "porn", "hentai"} and (item["score"] >= self.threshold):
                 log.warning("NSFW result blocked (score=%.2f)", item["score"])
                 raise ContentBlocked("Результат распознан как недопустимый контент.")
 

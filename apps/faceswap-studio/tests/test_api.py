@@ -276,3 +276,25 @@ def test_flux_checkpoint_and_lora_are_rejected_clearly(arch_client, tmp_path):
     assert res.status_code == 400
     assert "FLUX (не поддерживается)" in res.json()["detail"]
     assert calls == []
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "sexy woman in a red evening dress",
+        "lingerie fashion editorial, studio light",
+        "сексуальная девушка в вечернем платье",
+        "glamorous woman, hourglass figure, swimsuit on the beach",
+    ],
+)
+def test_prompt_filter_allows_suggestive_non_explicit(prompt):
+    check_prompt(prompt)
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    ["sex scene", "sexual act on a bed", "секс на пляже", "сцена с сексом", "topless woman", "nude model"],
+)
+def test_prompt_filter_still_blocks_explicit(prompt):
+    with pytest.raises(ContentBlocked):
+        check_prompt(prompt)
