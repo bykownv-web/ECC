@@ -3,7 +3,7 @@
   'use strict';
 
   const $ = (id) => document.getElementById(id);
-  const TABS = ['chat', 'proc', 'tender', 'analyst', 'settings'];
+  const TABS = Array.from(document.querySelectorAll('.tab[data-tab]')).map((b) => b.dataset.tab);
   const state = {
     tags: [],
     items: [],
