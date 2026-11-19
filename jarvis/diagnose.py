@@ -101,6 +101,7 @@ def main() -> int:
     if url:
         log.step("3. Карточка и документы закупки")
         log(f"карточка: {url}")
+        card = ""
         try:
             card = client.get_text(url)
             (out / "card.html").write_text(card, encoding="utf-8")
@@ -109,7 +110,7 @@ def main() -> int:
             log(f"       (служебно: карточек поиска на странице {len(parsed)})")
         except Exception as exc:
             log.fail(f"карточка: {exc}")
-        docs_url = tender_docs.documents_page_url(url)
+        docs_url = (tender_docs.find_documents_tab(card, url) if card else None) or tender_docs.documents_page_url(url)
         log(f"страница документов: {docs_url}")
         try:
             html = client.get_text(docs_url)

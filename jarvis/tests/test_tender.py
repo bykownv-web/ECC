@@ -273,3 +273,43 @@ def test_analysis_text_prioritizes_tz_and_trims_contract():
     text = tender_docs.build_analysis_text([("Проект контракта.docx", contract), ("ТЗ.docx", "Проектор 6000 лм")])
     assert text.index("ТЗ.docx") < text.index("Проект контракта.docx")
     assert "Срок поставки: 30 дней" in text and "Общие положения" not in text
+
+
+class FakeEIS:
+    def __init__(self, pages):
+        self.pages = pages
+        self.asked = []
+
+    def get_text(self, url):
+        from jarvis_app.procurement import ProcurementError
+
+        self.asked.append(url)
+        if url not in self.pages:
+            raise ProcurementError("ЕИС вернула код 404.")
+        return self.pages[url]
+
+    def get_file(self, url):
+        return b"%PDF-1.4 fake", "ТЗ.pdf"
+
+
+def test_223_documents_tab_is_taken_from_card(tmp_path):
+    card = "https://zakupki.gov.ru/epz/order/notice/notice223/common-info.html?regNumber=32616576327"
+    tab = "https://zakupki.gov.ru/epz/order/notice/notice223/documents.html?noticeInfoId=18447125"
+    eis = FakeEIS({
+        card: '<a href="/epz/order/notice/notice223/documents.html?noticeInfoId=18447125">Документы</a>',
+        tab: '<a href="https://zakupki.gov.ru/223/purchase/public/download/download.html?id=555" title="ТЗ.pdf">ТЗ</a>',
+    })
+    files = tender_docs.fetch_eis_documents(eis, card, tmp_path)
+    assert [f.name for f in files] == ["ТЗ.pdf"]
+    assert tab in eis.asked and tender_docs.documents_page_url(card) not in eis.asked
+
+
+def test_title_highlight_is_glued():
+    from jarvis_app.procurement import parse_results
+
+    html = """<div class="search-registry-entry-block">
+      <div class="registry-entry__header-mid__number"><a href="/x?regNumber=32616576327">№ 32616576327</a></div>
+      <div class="registry-entry__body-title">Объект закупки</div>
+      <div class="registry-entry__body-value">Поставка <span class="highlight">проектор</span>а и <b>экран</b>ов</div>
+    </div>"""
+    assert parse_results(html)[0].title == "Поставка проектора и экранов"

@@ -306,11 +306,47 @@ def parse_document_links(html: str, page_url: str) -> list[tuple[str, str]]:
     return found[:MAX_FILES]
 
 
+def find_documents_tab(card_html: str, card_url: str) -> str | None:
+    """Ссылка на вкладку «Документы» из карточки закупки (у 223-ФЗ в ней внутренний код, а не номер)."""
+    soup = BeautifulSoup(card_html, "html.parser")
+    for link in soup.find_all("a", href=True):
+        href = link["href"]
+        text = link.get_text(" ", strip=True).lower()
+        if "documents" in href.lower() and ".html" in href.lower() or text == "документы":
+            url = urljoin(card_url, href)
+            if urlparse(url).netloc.endswith("zakupki.gov.ru"):
+                return url
+    return None
+
+
 def fetch_eis_documents(client: ProcurementClient, purchase_url: str, dest: Path) -> list[Path]:
-    page_url = documents_page_url(purchase_url)
-    html = client.get_text(page_url)
-    links = parse_document_links(html, page_url)
+    card_html = ""
+    try:
+        card_html = client.get_text(purchase_url)
+    except ProcurementError:
+        pass
+    candidates = []
+    tab = find_documents_tab(card_html, purchase_url) if card_html else None
+    if tab:
+        candidates.append(tab)
+    guessed = documents_page_url(purchase_url)
+    if guessed not in candidates:
+        candidates.append(guessed)
+    links: list[tuple[str, str]] = []
+    last_error: ProcurementError | None = None
+    for page_url in candidates:
+        try:
+            links = parse_document_links(client.get_text(page_url), page_url)
+        except ProcurementError as exc:
+            last_error = exc
+            continue
+        if links:
+            break
+    if not links and card_html:
+        links = parse_document_links(card_html, purchase_url)  # некоторые карточки сразу содержат файлы
     if not links:
+        if last_error is not None and not card_html:
+            raise last_error
         raise ProcurementError(
             "На странице документов закупки не нашлось файлов. Скачайте ТЗ с сайта вручную "
             "и добавьте кнопкой «Выбрать файлы»."

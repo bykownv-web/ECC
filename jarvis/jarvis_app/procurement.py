@@ -126,9 +126,21 @@ def parse_date(text: str) -> date | None:
         return None
 
 
+_INLINE_TAGS = ("span", "b", "strong", "em", "i", "u", "mark", "font")
+
+
 def _text(node: Tag | None) -> str:
+    """Текст узла. Подсветку найденных слов (<span>проектор</span>а) склеиваем без лишних пробелов."""
     if node is None:
         return ""
+    if node.find(_INLINE_TAGS):
+        node = BeautifulSoup(str(node), "html.parser")
+        for tag in node.find_all(_INLINE_TAGS):
+            if not tag.find(True):  # только «листовые» строчные теги, вложенную разметку не трогаем
+                tag.unwrap()
+        for br in node.find_all("br"):
+            br.replace_with(" ")
+        node.smooth()
     return " ".join(node.get_text(" ", strip=True).split())
 
 
