@@ -4,7 +4,8 @@
 Все модели работают на вашем компьютере — никакие фото не уходят во внешние сервисы.
 
 - **Генерация** — text-to-image через [diffusers](https://github.com/huggingface/diffusers) (по умолчанию SDXL, подходит любая совместимая модель: SD 1.5, SDXL, SDXL-Turbo, RealVisXL и т.д.).
-- **Подмена лица** — детекция InsightFace (`buffalo_l`) + модель `inswapper_128.onnx`.
+- **Подмена лица** — модели InsightFace (`buffalo_l` + `inswapper_128.onnx`), запускаются напрямую через onnxruntime: пакет `insightface` и Visual C++ Build Tools не нужны.
+- **Прогресс** — полоска с шагами генерации, очередь задач и кнопка «Отменить».
 - **Генерация + лицо** — сгенерировать сцену и сразу вставить в неё лицо с фото.
 
 ## Быстрый старт для Windows
@@ -37,7 +38,7 @@
 | Ошибка pip про `typing_extensions` или «No matching distribution found for torch» | Это старый pip. `install.bat` обновляет его сам; если ошибка осталась — проверьте интернет и запустите ещё раз. |
 | В сводке «CUDA в PyTorch: нет», генерация очень медленная | Стоит PyTorch для CPU. Обновите драйвер NVIDIA, перезагрузите компьютер и снова запустите `install.bat` — он сам заменит PyTorch. Не ставьте `pip install torch` вручную: с PyPI на Windows ставится версия без CUDA. |
 | «nvidia-smi не найден» | Видеокарты NVIDIA нет или не установлен драйвер. Установите драйвер с [nvidia.com](https://www.nvidia.com/Download/index.aspx). Без NVIDIA всё работает только на CPU. |
-| `CUDA out of memory` / нехватка памяти | Уменьшите размер картинки (768×768 или 512×512) и число шагов, закройте игры и другие программы на видеокарте. При 6–8 ГБ VRAM берите модели SD 1.5 вместо SDXL. |
+| `CUDA out of memory` / нехватка памяти | Уменьшите размер картинки (768×768 или 512×512) и число шагов, закройте игры и другие программы на видеокарте. На картах до 10 ГБ режим экономии памяти включается сам; если не помогает — задайте `FSS_LOWVRAM=on` или берите модели SD 1.5. |
 | PyTorch не ставится с автоматически выбранной сборкой | Укажите сборку вручную: `install.bat -Torch cu121` (или `cu124`, `cu128`, `cpu`). |
 | `run.bat` пишет «сначала запустите install.bat» | Установка не была завершена — запустите `install.bat` и дочитайте сводку в конце. |
 
@@ -81,7 +82,15 @@ pip install -r requirements-gpu.txt
 `models/inswapper_128.onnx` или укажите путь через `FSS_SWAP_MODEL_PATH`.
 Модели InsightFace (`inswapper_128`, `buffalo_l`) распространяются **только для некоммерческого
 исследовательского использования** — проверьте лицензию перед применением.
-Пак детекции `buffalo_l` InsightFace скачает сам при первом запуске (в `~/.insightface`).
+Детектор и распознаватель лиц (`det_10g.onnx`, `w600k_r50.onnx` из официального архива `buffalo_l`,
+~280 МБ) скачиваются сами при первой подмене лица в `models/buffalo_l/`. Если у вас уже есть
+`~/.insightface/models/buffalo_l`, используется он. Если скачивание не удалось, скачайте вручную
+<https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip> и распакуйте эти
+два файла в `models/buffalo_l/`.
+
+Подмена лица работает на видеокарте NVIDIA через `onnxruntime-gpu`. Для AMD/Intel на Windows
+поставьте `onnxruntime-directml` вместо `onnxruntime-gpu`. Не ставьте `onnxruntime` и
+`onnxruntime-gpu` одновременно.
 
 Модель генерации скачивается с Hugging Face при первом запросе (в `~/.cache/huggingface`).
 
@@ -130,9 +139,10 @@ FSS_BACKEND=mock python -m app.main
 | `FSS_CHECKPOINTS_DIR` | `models/checkpoints/` | Папка с локальными чекпоинтами `.safetensors` |
 | `FSS_LORAS_DIR` | `models/loras/` | Папка с LoRA `.safetensors` |
 | `FSS_SWAP_MODEL_PATH` | `models/inswapper_128.onnx` | Путь к модели подмены лица |
-| `FSS_FACE_PACK` | `buffalo_l` | Пак детекции InsightFace |
 | `FSS_NSFW_MODEL` | `Falconsai/nsfw_image_detection` | NSFW-классификатор (пустая строка — выключить) |
 | `FSS_NSFW_THRESHOLD` | `0.7` | Порог NSFW-классификатора |
+| `FSS_LOWVRAM` | `auto` | Экономия видеопамяти (CPU offload + VAE tiling): `auto` включает при < 10 ГБ, `on`, `off` |
+| `FSS_MOCK_DELAY` | `0` | Секунд на «шаг» в mock-режиме (чтобы увидеть полоску прогресса) |
 | `FSS_WATERMARK` | `1` | Видимая метка `AI-generated` |
 | `FSS_OUTPUT_DIR` | `outputs/` | Куда сохраняются результаты |
 | `FSS_MAX_UPLOAD_MB` | `10` | Максимальный размер загружаемого файла |
@@ -154,6 +164,13 @@ FSS_BACKEND=mock python -m app.main
 | `POST` | `/api/generate-swap` | multipart: `source`, `prompt`, `consent=true`, + параметры генерации, `loras` как JSON-строка |
 | `GET` | `/api/images/{id}` | — (PNG) |
 | `DELETE` | `/api/images/{id}` | — |
+| `POST` | `/api/jobs/generate`, `/api/jobs/swap`, `/api/jobs/generate-swap` | как у обычных эндпоинтов; ответ `202 {"job_id": ...}` |
+| `GET` | `/api/jobs/{job_id}` | — (`status`, `stage`, `progress` 0..1, `queue_position`, `result`, `error`) |
+| `POST` | `/api/jobs/{job_id}/cancel` | — |
+
+Задачи выполняются по одной (видеокарта одна) и хранятся в памяти: последние 100, до перезапуска.
+`status`: `queued`, `running`, `done` или `error` (код `499` значит «отменено»).
+Обычные эндпоинты (`/api/generate` и т.д.) тоже работают и стоят в той же очереди.
 
 ```bash
 curl -X POST localhost:8000/api/generate -H 'Content-Type: application/json' \
@@ -168,12 +185,14 @@ curl -X POST localhost:8000/api/swap \
 ```text
 app/
   main.py      — FastAPI: маршруты, загрузка файлов, сохранение результатов
-  backends.py  — DiffusersGenerator (HF / .safetensors + LoRA), InsightFaceSwapper, mock
+  jobs.py      — очередь задач с прогрессом и отменой
+  backends.py  — DiffusersGenerator (HF / .safetensors + LoRA, low-VRAM), InsightFaceSwapper, mock
+  face_engine.py — детекция, распознавание и подмена лица на onnxruntime
   registry.py  — поиск локальных моделей и безопасное разрешение имён файлов
   safety.py    — фильтр промптов, NSFW-проверка, водяной знак, метаданные
   config.py    — настройки из переменных окружения
   static/      — веб-интерфейс (HTML/CSS/JS без сборки)
-tests/         — тесты API на mock-бэкенде
+tests/         — тесты на mock-бэкенде и поддельных моделях (без GPU)
 ```
 
 ## Тесты
