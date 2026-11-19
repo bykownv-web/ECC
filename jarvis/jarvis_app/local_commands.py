@@ -41,6 +41,15 @@ def parse_command(text: str) -> tuple[str, dict[str, Any]] | None:
     if not t:
         return None
 
+    link = re.search(r"https?://\S*zakupki\.gov\.ru\S*", text or "")
+    number = re.search(r"(?<!\d)(\d{19}|\d{11})(?!\d)", t)
+    if link:
+        return "prepare_tender", {"number": link.group(0)}
+    if number:
+        return "prepare_tender", {"number": number.group(1)}
+    if re.search(r"(разбор|разбери|разобрать|проанализируй|проверь)\w*\s+(тз|техническ\w* задани|документац|закупк\w* целиком)", t):
+        return "prepare_tender", {}
+
     if re.search(r"\b(закупк|тендер|аукцион|44.?фз|223.?фз)", t):
         if re.search(r"(excel|эксель|выгруз|экспорт|сохрани)", t):
             return "export_procurements", {}

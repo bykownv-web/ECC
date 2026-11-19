@@ -1022,6 +1022,9 @@
         case 'toast':
           toast(p.text);
           break;
+        case 'switch_tab':
+          if (p.tab) switchTab(p.tab);
+          break;
         case 'monitor_new':
           toast(p.text);
           addMessage('assistant', '🔔 ' + p.text);

@@ -85,6 +85,8 @@ class RemoteToolBox:
     def execute(self, name: str, args: dict[str, Any]) -> str:
         if name in REMOTE_BLOCKED_TOOLS:
             raise ToolError("Это действие нельзя выполнить из Telegram — только с компьютера.")
+        if name == "prepare_tender" and self._toolbox.tender_runner is not None:
+            return self._toolbox.tender_runner(str((args or {}).get("number") or ""), remote=True)
         return self._toolbox.execute(name, args)
 
     def __getattr__(self, item: str):
@@ -109,6 +111,7 @@ class JarvisApi:
         self._mailer = Mailer(config)
         self._notifier = Notifier(self._telegram, self._mailer, config)
         self._analyst = Analyst(config, self._toolbox.procurement_client, self._emit, notify=self._notify_external)
+        self._toolbox.tender_runner = self._tender_from_chat
         self._telegram.start()
         if config.get("analyst", {}).get("enabled"):
             self.set_monitoring(True)
@@ -438,6 +441,31 @@ class JarvisApi:
         if auto:
             self.tender_run_all()
         return {"ok": True}
+
+    def _tender_from_chat(self, number: str = "", remote: bool = False) -> str:
+        """Команда из диалога или Telegram: полный разбор закупки в фоне на вкладке «Заявка»."""
+        number = (number or "").strip()
+        current = (self._tender.state.get("purchase") or {}).get("number")
+        if not number and not current:
+            raise ToolError("Назовите номер закупки или нажмите «В работу» у закупки на вкладке «Закупки».")
+
+        def on_report(report: dict[str, Any]) -> None:
+            self._analyst.upsert_report(report)
+            if remote:
+                self._notify_external("Разбор закупки готов", format_report(report), email=False)
+
+        def job() -> None:
+            client = self._toolbox.procurement_client()
+            if number:
+                self._emit("tender_status", {"text": "Ищу закупку в ЕИС…", "busy": True})
+                self._tender.set_purchase(self._tender.find_purchase(number, client))
+            self._tender.run_pipeline(client, on_report)
+
+        self._emit("switch_tab", {"tab": "tender"})
+        self._tender_job(job)
+        target = f"№ {number}" if number else f"№ {current}"
+        tail = " Пришлю отчёт сюда, когда закончу." if remote else " Ход работы — на вкладке «Заявка»."
+        return f"Запустил полный разбор закупки {target}: документы, ТЗ, подбор, стоимость и документы заявки.{tail}"
 
     def tender_run_all(self) -> None:
         self._tender_job(self._tender.run_pipeline, self._toolbox.procurement_client(), self._analyst.upsert_report)

@@ -38,7 +38,9 @@ GIGACHAT_API = "https://gigachat.devices.sberbank.ru/api/v1/chat/completions"
 
 
 class CloudError(Exception):
-    pass
+    def __init__(self, message: str, too_large: bool = False) -> None:
+        super().__init__(message)
+        self.too_large = too_large
 
 
 def _tools_openai(tool_definitions: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -66,6 +68,8 @@ def _status_error(provider: str, response: requests.Response) -> CloudError:
         return CloudError(f"{provider}: закончились средства или лимит на счёте.")
     if code == 404:
         return CloudError(f"{provider}: модель или адрес не найдены (404). Проверьте название модели.")
+    if code == 413:
+        return CloudError(f"{provider}: запрос слишком большой (413).", too_large=True)
     if code == 429:
         return CloudError(f"{provider}: слишком много запросов, подождите минуту.")
     try:
@@ -97,16 +101,30 @@ class _ToolChatMixin:
         if self._on_tool:
             self._on_tool(name)
         try:
-            return self._toolbox.execute(name, args)[:8000]
+            return self._toolbox.execute(name, args)[: self.max_tool_chars]
         except ToolError as exc:
             return f"Ошибка: {exc}"
         except Exception as exc:  # инструмент не должен ронять разговор
             return f"Внутренняя ошибка: {exc.__class__.__name__}"
 
+    max_history = MAX_HISTORY
+    max_tool_chars = 8000
+
+    def ask(self, text: str) -> str:
+        """Если запрос не влез (413), забываем историю и пробуем ещё раз только с этим вопросом."""
+        try:
+            return self._ask_once(text)
+        except CloudError as exc:
+            if not exc.too_large:
+                raise
+            self._messages = []
+            self.max_tool_chars = min(self.max_tool_chars, 2500)
+            return self._ask_once(text)
+
     def _trim(self) -> None:
-        if len(self._messages) <= MAX_HISTORY:
+        if len(self._messages) <= self.max_history:
             return
-        cut = len(self._messages) - MAX_HISTORY
+        cut = len(self._messages) - self.max_history
         while cut < len(self._messages) and self._messages[cut].get("role") != "user":
             cut += 1
         del self._messages[:cut]
@@ -146,7 +164,7 @@ class OpenAICompatChat(_ToolChatMixin):
         except (ValueError, KeyError, IndexError, TypeError) as exc:
             raise CloudError("Сервис вернул непонятный ответ.") from exc
 
-    def ask(self, text: str) -> str:
+    def _ask_once(self, text: str) -> str:
         with self._lock:
             start = len(self._messages)
             self._messages.append({"role": "user", "content": text})
@@ -199,6 +217,8 @@ class GigaChat(_ToolChatMixin):
     """GigaChat API (Сбер). Ключ авторизации → токен доступа на 30 минут. Нужен сертификат Минцифры (папка certs)."""
 
     name = "GigaChat"
+    max_history = 16  # у GigaChat жёсткий лимит размера запроса
+    max_tool_chars = 3500
 
     def __init__(self, model: str, system_prompt: str, toolbox: Any = None, on_tool: Callable[[str], None] | None = None,
                  scope: str = "GIGACHAT_API_PERS", session: requests.Session | None = None, auth_key: str | None = None) -> None:
@@ -256,7 +276,7 @@ class GigaChat(_ToolChatMixin):
         except (ValueError, KeyError, IndexError, TypeError) as exc:
             raise CloudError("GigaChat вернул непонятный ответ.") from exc
 
-    def ask(self, text: str) -> str:
+    def _ask_once(self, text: str) -> str:
         from .tools import TOOL_DEFINITIONS
 
         functions = [{"name": t["name"], "description": t["description"], "parameters": t["input_schema"]} for t in TOOL_DEFINITIONS]

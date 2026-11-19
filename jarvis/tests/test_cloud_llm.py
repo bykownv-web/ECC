@@ -87,3 +87,16 @@ def test_errors_are_human_readable():
     except Exception as exc:
         assert "ключ не подошёл" in str(exc)
     assert chat._messages == []
+
+
+def test_gigachat_413_resets_history_and_retries():
+    sess = Sess([
+        Resp({"access_token": "T", "expires_at": 9999999999999}),
+        Resp({"message": "Payload Too Large"}, status=413),
+        Resp({"choices": [{"message": {"content": "Готово."}}]}),
+    ])
+    gc = GigaChat("GigaChat-2", "SYS", TB(), session=sess, auth_key="K")
+    gc._messages = [{"role": "user", "content": "старое"}, {"role": "assistant", "content": "x" * 50000}]
+    assert gc.ask("новый вопрос") == "Готово."
+    retry = sess.calls[-1]["json"]["messages"]
+    assert [m["role"] for m in retry] == ["system", "user"] and retry[-1]["content"] == "новый вопрос"

@@ -54,3 +54,18 @@ def test_unknown_command():
 )
 def test_wake_word(text, expected):
     assert extract_after_wake_word(text, "джарвис") == expected
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("32616576327 вот закупка все проверь", ("prepare_tender", {"number": "32616576327"})),
+        ("разбери 0318100005226000001", ("prepare_tender", {"number": "0318100005226000001"})),
+        ("проверь https://zakupki.gov.ru/epz/order/notice/zk20/view/common-info.html?regNumber=0318100005226000001",
+         ("prepare_tender", {"number": "https://zakupki.gov.ru/epz/order/notice/zk20/view/common-info.html?regNumber=0318100005226000001"})),
+        ("сделай разбор ТЗ", ("prepare_tender", {})),
+        ("найди закупки проектор", ("search_procurements", {"tags": ["проектор"]})),
+    ],
+)
+def test_tender_commands(text, expected):
+    assert parse_command(text) == expected

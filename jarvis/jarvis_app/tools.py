@@ -58,6 +58,16 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         ),
     },
     {
+        "name": "prepare_tender",
+        "description": (
+            "Полный разбор конкретной закупки: скачивает документы с ЕИС, разбирает ТЗ (сроки и место поставки, "
+            "монтаж, оплата, обеспечение), подбирает оборудование, считает стоимость и маржу, готовит документы Word. "
+            "Вызывай, когда пользователь даёт номер закупки (11 или 19 цифр) или ссылку на zakupki.gov.ru, "
+            "или просит разобрать ТЗ текущей закупки (тогда number не передавай). Работа идёт в фоне на вкладке «Заявка»."
+        ),
+        "input_schema": _schema({"number": {"type": "string", "description": "Номер закупки или ссылка."}}),
+    },
+    {
         "name": "procurement_analytics",
         "description": "Аналитика по последним найденным закупкам: суммы, законы, теги, крупнейшие заказчики, близкие сроки подачи.",
         "input_schema": _schema({}),
@@ -155,6 +165,7 @@ class ToolBox:
         self._results: list[Purchase] = []
         self._results_lock = threading.Lock()
         self.reminders = utilities.ReminderManager(self._on_reminder)
+        self.tender_runner: Callable[..., str] | None = None  # задаёт окно приложения
         self.seen = SeenStore(app_data_dir() / "seen_purchases.json")
 
     # ---------- закупки ----------
@@ -234,6 +245,10 @@ class ToolBox:
             if errors:
                 text += "\nОшибки: " + "; ".join(errors)
             return text
+        if name == "prepare_tender":
+            if self.tender_runner is None:
+                raise ToolError("Разбор закупок доступен только в окне Джарвиса.")
+            return self.tender_runner(str(args.get("number") or ""))
         if name == "procurement_analytics":
             results = self.last_results()
             if not results:
