@@ -1,0 +1,564 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>J.A.R.V.I.S.</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="hud-bg" aria-hidden="true"><i class="hud-glow g1"></i><i class="hud-glow g2"></i></div>
+  <header class="topbar">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 40 40" aria-hidden="true">
+        <circle cx="20" cy="20" r="18" class="bm-ring" />
+        <circle cx="20" cy="20" r="14" class="dash" />
+        <polygon points="20,10.5 28.2,15.25 28.2,24.75 20,29.5 11.8,24.75 11.8,15.25" class="bm-hex" />
+        <circle cx="20" cy="20" r="3.2" class="bm-core" />
+      </svg>
+      <div>
+        <div class="brand-title">J.A.R.V.I.S.</div>
+        <div class="brand-sub">Персональный ассистент · v7.0</div>
+      </div>
+    </div>
+    <div class="ticker" aria-hidden="true">
+      <span class="ticker-dot"></span><span class="ticker-on">SYS ONLINE</span>
+      <span class="sep">//</span><span id="date-label">—</span>
+      <span class="sep sep-uptime">//</span><span id="uptime-label">UPTIME 00:00</span>
+    </div>
+    <div class="topbar-right">
+      <span id="ai-pill" class="pill">ИИ: —</span>
+      <span id="voice-pill" class="pill">Голос: —</span>
+      <span id="clock" class="clock">--:--</span>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="core hud-panel">
+      <div class="panel-title"><span>Core</span><span class="panel-code">AR-01</span></div>
+      <div id="neural" class="neural" aria-hidden="true"></div>
+      <div id="reactor" class="reactor" data-mode="idle" aria-hidden="true">
+        <svg viewBox="0 0 240 240">
+          <defs>
+            <radialGradient id="core-grad">
+              <stop offset="0%" stop-color="#ffffff" />
+              <stop offset="30%" stop-color="var(--c)" />
+              <stop offset="100%" stop-color="var(--c)" stop-opacity="0" />
+            </radialGradient>
+            <radialGradient id="halo-grad">
+              <stop offset="55%" stop-color="var(--c)" stop-opacity="0" />
+              <stop offset="78%" stop-color="var(--c)" stop-opacity="0.16" />
+              <stop offset="100%" stop-color="var(--c)" stop-opacity="0" />
+            </radialGradient>
+          </defs>
+          <circle cx="120" cy="120" r="118" class="halo" fill="url(#halo-grad)" />
+          <g class="spin s-ticks"><circle cx="120" cy="120" r="114" class="ticks" /></g>
+          <circle cx="120" cy="120" r="107" class="thin" />
+          <g class="spin s-a">
+            <circle cx="120" cy="120" r="100" class="arc-a-glow" />
+            <circle cx="120" cy="120" r="100" class="arc-a" />
+          </g>
+          <g class="spin s-b"><circle cx="120" cy="120" r="91" class="arc-b" /></g>
+          <g class="spin s-c"><circle cx="120" cy="120" r="82" class="arc-c" /></g>
+          <g class="brackets">
+            <path d="M120 44 l-6 -6 h12 z" /><path d="M120 196 l-6 6 h12 z" />
+            <path d="M44 120 l-6 -6 v12 z" /><path d="M196 120 l6 -6 v12 z" />
+          </g>
+          <circle cx="120" cy="120" r="70" class="thin" />
+          <g class="spin s-coil"><circle cx="120" cy="120" r="57" class="coil" /></g>
+          <circle cx="120" cy="120" r="45" class="thin inner" />
+          <g class="spin s-tri">
+            <polygon points="120,86 149.4,103 149.4,137 120,154 90.6,137 90.6,103" class="tri" />
+            <polygon points="120,96 140.8,108 140.8,132 120,144 99.2,132 99.2,108" class="tri-in" />
+          </g>
+          <circle cx="120" cy="120" r="30" class="core-glow" fill="url(#core-grad)" />
+          <circle cx="120" cy="120" r="11" class="core-dot" />
+        </svg>
+      </div>
+      <div id="state-label" class="state-label">Ожидание</div>
+      <div id="tool-label" class="tool-label"></div>
+
+      <div class="core-buttons">
+        <button id="mic-btn" class="btn btn-primary" title="Сказать команду"><svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="5.5" y="1.5" width="5" height="8.5" rx="2.5" /><path d="M3 8a5 5 0 0 0 10 0M8 13v2" /></svg>Говорить</button>
+        <button id="stop-btn" class="btn" title="Прервать речь"><svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="3.5" y="3.5" width="9" height="9" /></svg>Тише</button>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="wake-toggle">
+        <span>Слушать фоном («Джарвис, …»)</span>
+      </label>
+
+      <div class="telemetry">
+        <div class="tele-head" aria-hidden="true"><span>Телеметрия</span><span class="panel-code">SYS-02</span></div>
+        <div class="tele-row"><span>CPU</span><div class="bar"><i id="sys-cpu-bar"></i></div><b id="sys-cpu">—</b></div>
+        <div class="tele-row"><span>RAM</span><div class="bar"><i id="sys-ram-bar"></i></div><b id="sys-ram">—</b></div>
+        <div class="tele-row"><span>DISK</span><div class="bar"><i id="sys-disk-bar"></i></div><b id="sys-disk">—</b></div>
+      </div>
+      <div class="hint">
+        «Найди закупки проектор» · «Какая погода?» · «Открой калькулятор» ·
+        «Напомни через 15 минут позвонить заказчику»
+      </div>
+    </section>
+
+    <section class="panel hud-panel">
+      <nav class="tabs" role="tablist">
+        <button class="tab active" data-tab="chat" role="tab"><i>01</i>Диалог</button>
+        <button class="tab" data-tab="proc" role="tab"><i>02</i>Закупки</button>
+        <button class="tab" data-tab="tender" role="tab"><i>03</i>Заявка</button>
+        <button class="tab" data-tab="analyst" role="tab"><i>04</i>Аналитика</button>
+        <button class="tab" data-tab="agents" role="tab"><i>05</i>Агенты</button>
+        <button class="tab" data-tab="settings" role="tab"><i>06</i>Настройки</button>
+      </nav>
+
+      <!-- Диалог -->
+      <div class="tab-body active" id="tab-chat">
+        <div class="chat-head" aria-hidden="true"><span class="ch-dot"></span><span>Канал связи</span><span class="ch-line"></span><span class="panel-code">LINK · SECURE</span></div>
+        <div id="messages" class="messages" aria-live="polite"></div>
+        <form id="chat-form" class="chat-form">
+          <input id="chat-input" type="text" autocomplete="off" placeholder="Напишите команду или вопрос…">
+          <button class="btn btn-primary" type="submit">Отправить</button>
+          <button class="btn" type="button" id="reset-btn" title="Начать новый диалог">Новый</button>
+        </form>
+      </div>
+
+      <!-- Закупки -->
+      <div class="tab-body" id="tab-proc">
+        <div class="proc-controls">
+          <div class="field grow">
+            <label for="tag-input">Ключевые слова (теги)</label>
+            <div id="tags" class="tags"></div>
+            <div class="inline">
+              <input id="tag-input" type="text" placeholder="Добавить тег и нажать Enter">
+              <button class="btn" id="tag-add" type="button">+</button>
+            </div>
+          </div>
+          <div class="field">
+            <label>Законы</label>
+            <label class="check"><input type="checkbox" id="fz44" checked> 44-ФЗ</label>
+            <label class="check"><input type="checkbox" id="fz223" checked> 223-ФЗ</label>
+            <label class="check"><input type="checkbox" id="only-active" checked> Только подача заявок</label>
+            <label class="check" title="Закупка показывается, только если в её названии есть все слова тега"><input type="checkbox" id="strict" checked> Только точно по тегам</label>
+          </div>
+          <div class="field">
+            <label for="price-from">НМЦК, ₽</label>
+            <div class="inline">
+              <input id="price-from" type="number" min="0" placeholder="от">
+              <input id="price-to" type="number" min="0" placeholder="до">
+            </div>
+          </div>
+        </div>
+        <div class="field minus-field">
+          <label for="minus-words">Минус-слова — закупки с ними в названии скрываются (через запятую, достаточно начала слова)</label>
+          <textarea id="minus-words" rows="2" spellcheck="false"></textarea>
+        </div>
+        <div class="proc-actions">
+          <button class="btn btn-primary" id="proc-search">▶ Найти</button>
+          <button class="btn" id="proc-export">⇩ В Excel</button>
+          <label class="check"><input type="checkbox" id="monitor-toggle"> Мониторинг новых закупок</label>
+        </div>
+        <div id="proc-status" class="proc-status"></div>
+
+        <div class="cards">
+          <div class="card"><div class="card-label">Закупок</div><div class="card-value" id="a-count">—</div></div>
+          <div class="card"><div class="card-label">Сумма НМЦК</div><div class="card-value" id="a-sum">—</div></div>
+          <div class="card"><div class="card-label">Средняя НМЦК</div><div class="card-value" id="a-avg">—</div></div>
+          <div class="card"><div class="card-label">44-ФЗ / 223-ФЗ</div><div class="card-value" id="a-law">—</div></div>
+          <div class="card warn"><div class="card-label">Подача ≤ 3 дней</div><div class="card-value" id="a-soon">—</div></div>
+        </div>
+
+        <div class="proc-split">
+          <div class="table-wrap">
+            <div class="inline table-tools">
+              <input id="proc-filter" type="text" placeholder="Фильтр по названию, заказчику, номеру">
+              <select id="proc-sort">
+                <option value="price">Сначала дорогие</option>
+                <option value="deadline">Ближайший срок</option>
+                <option value="updated">Недавно обновлённые</option>
+              </select>
+            </div>
+            <table class="table">
+              <thead>
+                <tr><th>Номер / закон</th><th>Объект закупки</th><th>Заказчик</th><th>НМЦК</th><th>Подача до</th><th></th></tr>
+              </thead>
+              <tbody id="proc-body"></tbody>
+            </table>
+            <div id="proc-empty" class="empty">Нажмите «Найти» или скажите «Джарвис, найди закупки».</div>
+          </div>
+          <aside class="side">
+            <div>
+              <h3>Крупные заказчики</h3>
+              <ol id="top-customers" class="list"></ol>
+            </div>
+            <div>
+              <h3>По тегам</h3>
+              <ul id="by-tag" class="list"></ul>
+            </div>
+          </aside>
+        </div>
+      </div>
+
+
+      <!-- Заявка -->
+      <div class="tab-body" id="tab-tender">
+        <ol class="tender-progress" aria-hidden="true">
+          <li class="tp tp-1"><b>01</b><span>Закупка</span></li>
+          <li class="tp tp-2"><b>02</b><span>Документы ТЗ</span></li>
+          <li class="tp tp-3"><b>03</b><span>Разбор</span></li>
+          <li class="tp tp-4"><b>04</b><span>Подбор</span></li>
+          <li class="tp tp-5"><b>05</b><span>Стоимость</span></li>
+          <li class="tp tp-6"><b>06</b><span>Заявка</span></li>
+        </ol>
+        <div class="tender-grid">
+          <section class="tender-step" id="step-purchase">
+            <header class="step-head"><span class="step-num">01</span><h2>Закупка</h2></header>
+            <div id="tender-purchase" class="tender-purchase empty-state">Нажмите «В работу» у закупки на вкладке «Закупки» или введите номер.</div>
+            <div class="inline">
+              <input id="tender-number" type="text" placeholder="Номер закупки или ссылка на zakupki.gov.ru">
+              <button class="btn" id="tender-find" type="button">Найти</button>
+            </div>
+            <div class="inline">
+              <button class="btn btn-primary" id="tender-run-all" type="button">▶ Выполнить всё автоматически</button>
+              <span id="tender-timer" class="tender-timer"></span>
+            </div>
+          </section>
+
+          <section class="tender-step" id="step-files">
+            <header class="step-head"><span class="step-num">02</span><h2>Документы ТЗ</h2></header>
+            <div class="step-actions">
+              <button class="btn btn-primary" id="tender-fetch" type="button">⇩ Скачать с ЕИС</button>
+              <button class="btn" id="tender-pick" type="button">▣ Выбрать файлы…</button>
+              <button class="btn btn-ghost" id="tender-clear" type="button">Очистить</button>
+            </div>
+            <ul id="tender-files" class="file-list"></ul>
+            <div id="tender-text-info" class="hint"></div>
+          </section>
+
+          <section class="tender-step wide" id="step-analysis">
+            <header class="step-head"><span class="step-num">03</span><h2>Разбор ТЗ</h2>
+              <button class="btn btn-primary" id="tender-analyze" type="button">◆ Разобрать ТЗ</button></header>
+            <div id="tender-facts" class="facts"></div>
+            <div id="tender-lists" class="tender-lists"></div>
+            <table class="table tender-table" id="tender-positions-table">
+              <thead><tr><th>№</th><th>Позиция</th><th>Кол-во</th><th>Требования заказчика</th></tr></thead>
+              <tbody id="tender-positions"></tbody>
+            </table>
+          </section>
+
+          <section class="tender-step wide" id="step-match">
+            <header class="step-head"><span class="step-num">04</span><h2>Подбор оборудования</h2>
+              <button class="btn btn-primary" id="tender-match" type="button">◆ Подобрать</button></header>
+            <div class="inline catalog-line">
+              <span id="tender-catalog" class="hint"></span>
+              <button class="btn btn-ghost" id="tender-catalog-import" type="button">Загрузить каталог (Excel)…</button>
+            </div>
+            <table class="table tender-table" id="tender-matches-table">
+              <thead><tr><th>Позиция</th><th>Предложение</th><th>Соответствие</th><th>Цена</th><th>Примечание</th></tr></thead>
+              <tbody id="tender-matches"></tbody>
+            </table>
+          </section>
+
+          <section class="tender-step wide" id="step-estimate">
+            <header class="step-head"><span class="step-num">05</span><h2>Стоимость и маржа</h2></header>
+            <div id="tender-estimate" class="tender-estimate empty-state">Появится после разбора ТЗ.</div>
+          </section>
+
+          <section class="tender-step wide" id="step-docs">
+            <header class="step-head"><span class="step-num">06</span><h2>Документы заявки</h2>
+              <button class="btn btn-primary" id="tender-build" type="button">▤ Сформировать</button></header>
+            <ul id="tender-docs" class="file-list"></ul>
+            <div class="inline">
+              <button class="btn btn-ghost" id="tender-open-folder" type="button">Открыть папку заявки</button>
+              <span class="hint">Это черновики: перед подачей сверьте характеристики с ТЗ и спецификацией производителя.</span>
+            </div>
+          </section>
+        </div>
+        <div id="tender-status" class="tender-status"></div>
+      </div>
+
+      <!-- Аналитика -->
+      <div class="tab-body" id="tab-analyst">
+        <section class="tender-step wide analyst-setup">
+          <header class="step-head"><span class="step-num">AI</span><h2>Автоаналитика закупок</h2>
+            <button class="btn btn-primary" id="an-run" type="button">▶ Проанализировать сейчас</button></header>
+          <label for="an-profile" class="field-label">Профиль компании — что вы поставляете и монтируете (по нему Джарвис оценивает закупки)</label>
+          <textarea id="an-profile" rows="3"></textarea>
+          <div class="inline an-options">
+            <label class="check"><input type="checkbox" id="an-enabled"> Анализировать автоматически при мониторинге</label>
+            <label class="field-label" for="an-min">Порог, баллов</label>
+            <input id="an-min" type="number" min="0" max="100">
+            <label class="field-label" for="an-top">Подробно разбирать, шт. за раз</label>
+            <input id="an-top" type="number" min="1" max="10">
+            <button class="btn" id="an-save" type="button">Сохранить</button>
+          </div>
+          <div id="an-status" class="tender-status"></div>
+        </section>
+        <div class="analyst-split">
+          <div id="an-reports" class="an-reports"></div>
+          <aside class="side an-scores-box">
+            <div>
+              <h3>Оценка соответствия</h3>
+              <ol id="an-scores" class="list an-scores"></ol>
+            </div>
+          </aside>
+        </div>
+      </div>
+
+      <!-- Агенты -->
+      <div class="tab-body" id="tab-agents">
+        <header class="agents-head">
+          <div>
+            <h2 class="agents-title">Агенты J.A.R.V.I.S.</h2>
+            <div id="agents-summary" class="hint">Все агенты ждут задач</div>
+          </div>
+          <div class="inline">
+            <select id="agents-filter" title="Показать журнал одного агента">
+              <option value="all">Журнал: все агенты</option>
+              <option value="search">🔎 Поисковик ЕИС</option>
+              <option value="docs">📄 Документовед</option>
+              <option value="tz">🧠 Аналитик ТЗ</option>
+              <option value="match">🧩 Подборщик</option>
+              <option value="estimate">💰 Сметчик</option>
+              <option value="scout">📊 Аналитик закупок</option>
+              <option value="monitor">👁 Монитор</option>
+              <option value="comms">✉️ Связной</option>
+            </select>
+            <button class="btn btn-ghost" id="agents-clear-filter" type="button">Все</button>
+          </div>
+        </header>
+        <div id="agents-grid" class="agents-grid"></div>
+        <div class="agents-console">
+          <div class="agents-console-head"><span>◆ Журнал работы</span><span class="hint">новые записи — внизу</span></div>
+          <div id="agents-log" class="agents-log" aria-live="polite"></div>
+        </div>
+      </div>
+
+      <!-- Настройки -->
+      <div class="tab-body" id="tab-settings">
+        <form id="settings-form" class="settings" novalidate>
+          <fieldset>
+            <legend>ИИ (умный режим)</legend>
+            <label for="ai-provider">Кто думает за Джарвиса</label>
+            <select id="ai-provider">
+              <option value="gigachat">GigaChat (Сбер) — быстро, без VPN, бесплатный лимит</option>
+              <option value="openai">Облачная модель: Hermes, YandexGPT, DeepSeek, OpenRouter…</option>
+              <option value="ollama">Ollama — бесплатно, на этом компьютере (медленно без видеокарты)</option>
+              <option value="claude">Claude — платно, по ключу Anthropic</option>
+              <option value="none">Без ИИ — только простые команды</option>
+            </select>
+            <div id="ollama-box" class="eleven-box">
+              <label for="ollama-model">Модель Ollama</label>
+              <div class="inline">
+                <input id="ollama-model" type="text" list="ollama-models" placeholder="qwen2.5:7b">
+                <button class="btn" type="button" id="check-ollama">Проверить</button>
+              </div>
+              <datalist id="ollama-models">
+                <option value="qwen2.5:7b">
+                <option value="qwen2.5:3b">
+                <option value="qwen2.5:14b">
+                <option value="llama3.1:8b">
+              </datalist>
+              <div id="ollama-status" class="hint">qwen2.5:7b — для ПК от 16 ГБ памяти, qwen2.5:3b — для слабых ПК.</div>
+            </div>
+            <div id="gigachat-box" class="eleven-box">
+              <label for="gc-key">Ключ авторизации GigaChat (developers.sber.ru → проект → API-ключ)</label>
+              <div class="inline">
+                <input id="gc-key" type="password" autocomplete="off" placeholder="Authorization key (длинная строка, заканчивается на ==)">
+                <button class="btn" type="button" id="gc-save">Сохранить</button>
+              </div>
+              <div class="inline">
+                <select id="gc-model">
+                  <option value="GigaChat-2">GigaChat 2 Lite — быстрее, бесплатный лимит больше</option>
+                  <option value="GigaChat-2-Pro">GigaChat 2 Pro — умнее</option>
+                  <option value="GigaChat-2-Max">GigaChat 2 Max — самый умный</option>
+                </select>
+                <select id="gc-scope" title="Тип доступа">
+                  <option value="GIGACHAT_API_PERS">Физлицо</option>
+                  <option value="GIGACHAT_API_B2B">Юрлицо (B2B)</option>
+                  <option value="GIGACHAT_API_CORP">Юрлицо (CORP)</option>
+                </select>
+              </div>
+              <div id="gc-status" class="hint"></div>
+            </div>
+            <div id="openai-box" class="eleven-box">
+              <label for="oa-preset">Сервис</label>
+              <select id="oa-preset">
+                <option value="hermes_openrouter">Hermes 4 через OpenRouter</option>
+                <option value="hermes_nous">Hermes 4 через Nous Portal</option>
+                <option value="yandex">YandexGPT (Yandex Cloud)</option>
+                <option value="deepseek">DeepSeek</option>
+                <option value="openrouter">OpenRouter (бесплатные модели)</option>
+                <option value="groq">Groq</option>
+                <option value="lmstudio">LM Studio на этом ПК (с видеокартой)</option>
+                <option value="custom">Другой OpenAI-совместимый сервис</option>
+              </select>
+              <input id="oa-url" type="text" placeholder="Адрес API, например https://openrouter.ai/api/v1">
+              <input id="oa-model" type="text" placeholder="Модель">
+              <div class="inline">
+                <input id="oa-key" type="password" autocomplete="off" placeholder="API-ключ сервиса (хранится в диспетчере учётных данных Windows)">
+                <button class="btn" type="button" id="oa-save">Сохранить ключ</button>
+              </div>
+              <div id="oa-status" class="hint"></div>
+            </div>
+            <button class="btn btn-ghost" type="button" id="test-ai">Проверить ИИ (скорость ответа)</button>
+            <div id="claude-box" class="eleven-box">
+            <label for="api-key">API-ключ Anthropic</label>
+            <div class="inline">
+              <input id="api-key" type="password" autocomplete="off" placeholder="sk-ant-… (хранится в диспетчере учётных данных Windows)">
+              <button class="btn" type="button" id="save-key">Сохранить ключ</button>
+            </div>
+            <div id="key-status" class="hint"></div>
+            <label for="model">Модель</label>
+            <select id="model">
+              <option value="claude-opus-5-5">Claude Opus 5.5 — умнее</option>
+              <option value="claude-sonnet-5-5">Claude Sonnet 5.5 — дешевле</option>
+              <option value="claude-haiku-5-5">Claude Haiku 5.5 — быстрее и дешевле всего</option>
+            </select>
+            <label for="effort">Глубина размышлений</label>
+            <select id="effort">
+              <option value="low">Быстро (low)</option>
+              <option value="medium">Обычно (medium)</option>
+              <option value="high">Тщательно (high)</option>
+            </select>
+            </div>
+          </fieldset>
+          <fieldset>
+            <legend>Помощник</legend>
+            <label for="assistant-name">Имя помощника</label>
+            <input id="assistant-name" type="text">
+            <label for="user-name">Как обращаться к вам</label>
+            <input id="user-name" type="text">
+            <label for="wake-word">Слово-активатор</label>
+            <input id="wake-word" type="text">
+            <label for="city">Город для погоды</label>
+            <input id="city" type="text">
+            <label class="check"><input type="checkbox" id="voice-enabled"> Озвучивать ответы</label>
+            <label for="tts-voice">Голос</label>
+            <select id="tts-voice">
+              <option value="elevenlabs">ElevenLabs — студийное качество (нужен ключ)</option>
+              <option value="ru-RU-DmitryNeural">Дмитрий — мужской, нейросетевой</option>
+              <option value="ru-RU-SvetlanaNeural">Светлана — женский, нейросетевой</option>
+              <option value="sapi">Системный голос Windows (без интернета)</option>
+            </select>
+            <div class="inline">
+              <select id="tts-pitch" title="Тон">
+                <option value="+0Hz">Тон обычный</option>
+                <option value="-8Hz">Тон ниже</option>
+                <option value="-15Hz">Тон ещё ниже</option>
+              </select>
+              <select id="tts-rate" title="Скорость">
+                <option value="-10%">Медленнее</option>
+                <option value="+0%">Обычная скорость</option>
+                <option value="+10%">Быстрее</option>
+              </select>
+              <button class="btn" type="button" id="test-voice">▶ Проверить</button>
+            </div>
+            <div id="eleven-box" class="eleven-box">
+              <label for="eleven-voice">Голос ElevenLabs</label>
+              <select id="eleven-voice">
+                <option value="onwK4e9ZLuTAKqWW03F9">Daniel — британский, сдержанный</option>
+                <option value="JBFqnCBsd6RMkjVDRZzb">George — британский, тёплый, низкий</option>
+                <option value="custom">Свой голос по ID…</option>
+              </select>
+              <input id="eleven-custom" type="text" placeholder="Voice ID из вашей библиотеки ElevenLabs">
+              <label for="eleven-key">Ключ ElevenLabs</label>
+              <div class="inline">
+                <input id="eleven-key" type="password" autocomplete="off" placeholder="Ключ API (хранится в диспетчере учётных данных Windows)">
+                <button class="btn" type="button" id="save-eleven-key">Сохранить</button>
+              </div>
+              <div id="eleven-status" class="hint"></div>
+            </div>
+          </fieldset>
+          <fieldset>
+            <legend>Программы</legend>
+            <label for="apps">По одной в строке: название = команда или путь к .exe</label>
+            <textarea id="apps" rows="8" spellcheck="false"></textarea>
+          </fieldset>
+          <fieldset>
+            <legend>Закупки</legend>
+            <label for="pages">Страниц на тег (по 50 закупок)</label>
+            <input id="pages" type="number" min="1" max="10">
+            <label for="interval">Мониторинг: проверять каждые, мин</label>
+            <input id="interval" type="number" min="10" max="1440">
+            <label for="ca-bundle">Сертификат Минцифры: файл или папка (по умолчанию %APPDATA%\Jarvis\certs)</label>
+            <input id="ca-bundle" type="text" placeholder="C:\путь\к\russian_trusted_root_ca.cer">
+          </fieldset>
+          <fieldset>
+            <legend>Реквизиты компании (для документов)</legend>
+            <label for="co-name">Наименование</label>
+            <input id="co-name" type="text" placeholder="ООО «Ромашка»">
+            <div class="inline">
+              <input id="co-inn" type="text" placeholder="ИНН">
+              <input id="co-kpp" type="text" placeholder="КПП">
+              <input id="co-ogrn" type="text" placeholder="ОГРН">
+            </div>
+            <label for="co-address">Адрес</label>
+            <input id="co-address" type="text">
+            <div class="inline">
+              <input id="co-director-position" type="text" placeholder="Должность руководителя">
+              <input id="co-director" type="text" placeholder="Фамилия И.О.">
+            </div>
+            <div class="inline">
+              <input id="co-phone" type="text" placeholder="Телефон">
+              <input id="co-email" type="text" placeholder="E-mail">
+            </div>
+          </fieldset>
+          <fieldset>
+            <legend>Telegram</legend>
+            <div id="tg-status" class="hint">Не подключён.</div>
+            <label for="tg-token">Токен бота от @BotFather</label>
+            <div class="inline">
+              <input id="tg-token" type="password" autocomplete="off" placeholder="1234567890:AAH… (хранится в диспетчере учётных данных Windows)">
+              <button class="btn" type="button" id="tg-connect">Подключить</button>
+            </div>
+            <div id="tg-code" class="tg-code"></div>
+            <button class="btn btn-primary" type="button" id="tg-open" style="display:none">Открыть бота и привязать</button>
+            <div id="tg-health" class="hint"></div>
+            <div class="inline">
+              <button class="btn btn-ghost" type="button" id="tg-test">Проверить связь</button>
+              <button class="btn btn-ghost" type="button" id="tg-disconnect">Отключить</button>
+            </div>
+          </fieldset>
+          <fieldset>
+            <legend>Почта (отчёты и уведомления)</legend>
+            <label class="check"><input type="checkbox" id="em-enabled"> Отправлять отчёты на почту</label>
+            <label for="em-preset">Почтовый сервис</label>
+            <select id="em-preset">
+              <option value="yandex">Яндекс Почта</option>
+              <option value="mailru">Mail.ru</option>
+              <option value="gmail">Gmail</option>
+              <option value="custom">Другой SMTP-сервер</option>
+            </select>
+            <div class="inline" id="em-custom">
+              <input id="em-host" type="text" placeholder="smtp.example.ru">
+              <input id="em-port" type="number" placeholder="465">
+            </div>
+            <label for="em-login">Ваш адрес (логин)</label>
+            <input id="em-login" type="text" placeholder="name@yandex.ru">
+            <label for="em-password">Пароль приложения (не обычный пароль от почты)</label>
+            <input id="em-password" type="password" autocomplete="off" placeholder="хранится в диспетчере учётных данных Windows">
+            <label for="em-to">Куда присылать отчёты</label>
+            <input id="em-to" type="text" placeholder="по умолчанию — на ваш же адрес">
+            <div class="inline">
+              <button class="btn" type="button" id="em-save">Сохранить почту</button>
+              <button class="btn btn-ghost" type="button" id="em-test">Тестовое письмо</button>
+            </div>
+            <div id="em-status" class="hint"></div>
+          </fieldset>
+          <fieldset>
+            <legend>Ярлык</legend>
+            <div class="hint">Значок J.A.R.V.I.S. на рабочем столе для быстрого запуска.</div>
+            <button class="btn" type="button" id="make-shortcut">Создать ярлык на рабочем столе</button>
+          </fieldset>
+          <div class="inline">
+            <button class="btn btn-primary" type="submit">Сохранить настройки</button>
+            <span id="settings-status" class="hint"></span>
+          </div>
+        </form>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" role="status"></div>
+  <script src="neural.js"></script>
+  <script src="app.js"></script>
+  <script src="agents.js"></script>
+</body>
+</html>
