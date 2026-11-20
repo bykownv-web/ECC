@@ -64,7 +64,7 @@ def test_run_bat_checks_venv_and_opens_browser():
     assert 'cd /d "%~dp0"' in text
     assert ".venv\\Scripts\\python.exe" in text
     assert "install.bat" in text
-    assert "http://127.0.0.1:8000" in text
+    assert "--open-browser" in text
     assert "-m app.main" in text
     assert "FSS_BACKEND=mock" in (APP_DIR / "run-mock.bat").read_text(encoding="utf-8")
 

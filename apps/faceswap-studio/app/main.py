@@ -328,15 +328,29 @@ def create_app(settings: Settings | None = None, backends: Backends | None = Non
 
 def run() -> None:
     import argparse
+    import os
 
     import uvicorn
 
+    from .launcher import DEFAULT_PORT, browser_host, find_free_port, open_browser_when_ready
+
     parser = argparse.ArgumentParser(description="Image Studio")
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--port", type=int, default=None, help="по умолчанию FSS_PORT или 8000")
+    parser.add_argument("--open-browser", action="store_true", help="открыть браузер, когда сервер готов")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
-    uvicorn.run(create_app(), host=args.host, port=args.port)
+
+    wanted = args.port or int(os.environ.get("FSS_PORT") or DEFAULT_PORT)
+    port = find_free_port(args.host, wanted)
+    if port != wanted:
+        log.warning("Порт %d занят или запрещён Windows, использую порт %d.", wanted, port)
+    url = f"http://{browser_host(args.host)}:{port}"
+    print(f"\n  Image Studio: {url}\n", flush=True)
+    app = create_app()
+    if args.open_browser:
+        open_browser_when_ready(url)
+    uvicorn.run(app, host=args.host, port=port)
 
 
 if __name__ == "__main__":
